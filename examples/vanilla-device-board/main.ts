@@ -33,7 +33,7 @@ async function connect(serverUrl: string, startLogin = false) {
   const state = await client.initialize();
   if (state.status !== 'authenticated') { if (startLogin) await client.signIn(); return; }
   $('connection').hidden = true; $('dashboard').hidden = false; $('sign-out').hidden = false;
-  scope = state.user?.customerId ?? null;
+  scope = state.user?.role === 'ADMIN' ? null : state.user?.customerId ?? null;
   if (state.user?.role === 'ADMIN') {
     const list = await readCompleteList<{id:number;name:string}>(client.api, WB.customer, { instance: true, select: 'id,name', size: 100, sort: 'name,asc' });
     for (const customer of list) { const option = document.createElement('option'); option.value = String(customer.id); option.textContent = customer.name; $('customer').append(option); }
