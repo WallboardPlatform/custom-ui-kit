@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"], "types": ["node", "vite/client"],
+    "strict": true, "skipLibCheck": true, "noEmit": true,
+    "baseUrl": ".", "paths": {
+      "@wallboard/custom-ui-kit": ["src/index.ts"],
+      "@wallboard/custom-ui-kit/browser": ["src/browser/index.ts"],
+      "@wallboard/custom-ui-kit/api": ["src/api/index.ts"],
+      "@wallboard/custom-ui-kit/backend": ["src/backend/index.ts"],
+      "@wallboard/custom-ui-kit/vue": ["src/vue/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "examples/**/*.ts", "examples/**/*.vue", "test/**/*.ts", "vitest.config.ts"]
+}
