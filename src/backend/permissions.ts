@@ -8,14 +8,14 @@ export interface CustomerScope {
 }
 
 export interface CustomerScopeOptions {
-  /** Requested customer; regular users may only choose their own customer. */
+  /** ADMIN must choose explicitly; regular users may only choose their own customer. */
   customerId?: number;
   /** Application-owned allowlist; ADMIN does not automatically own every tenant. */
   allowedAdminCustomerIds?: readonly number[];
 }
 
 export function resolveCustomerScope(identity: VerifiedIdentity, options: CustomerScopeOptions = {}): CustomerScope {
-  const customerId = options.customerId ?? identity.customerId;
+  const customerId = identity.role === 'ADMIN' ? options.customerId : options.customerId ?? identity.customerId;
   if (typeof customerId !== 'number' || !Number.isSafeInteger(customerId) || customerId <= 0) {
     throw new WallboardValidationError('forbidden', 403, 'Choose an application-authorized customer.');
   }

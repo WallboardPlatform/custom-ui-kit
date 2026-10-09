@@ -55,7 +55,7 @@
     },
     "backend": {
       "example": "examples/node-notes provides Node HTTP and parameterized SQLite CRUD scoped to configured server, customer and user.",
-      "authorization": "resolveCustomerScope denies global-admin database access unless an application-owned allowlist authorizes the requested customer. The example write policy is disabled by default.",
+      "authorization": "resolveCustomerScope requires global admins to explicitly choose an application-allowlisted customer, even when their verified profile contains a customerId. Regular users may use their own customer. The example write policy is disabled by default.",
       "storage": "The app owns its database schema, retention and access rules. Use a durable database supported by the provider; an ephemeral SQLite file is not production persistence.",
       "sessionBoundary": "The shipped backend accepts bearer tokens per request. A cookie-session BFF requires a complete callback, secure session, CSRF and logout implementation.",
       "adaptation": "Other backend languages or provider runtimes can implement the same validated /me identity and application data boundary; Node is an executable reference."

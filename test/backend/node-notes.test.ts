@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { request as httpRequest, type Server } from 'node:http';
+import { createServer, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createNotesServer } from '../../examples/node-notes/server.js';
 import { NotesStore } from '../../examples/node-notes/store.js';
-import { WallboardValidationError, type CustomerScope, type VerifiedIdentity } from '../../src/backend/index.js';
+import { createWallboardValidator, WallboardValidationError, type CustomerScope, type VerifiedIdentity } from '../../src/backend/index.js';
 
 const owner: VerifiedIdentity = {
   serverUrl: 'https://wallboard.example.test', email: 'one@example.test', name: 'One',
@@ -148,6 +148,37 @@ describe('notes HTTP backend', () => {
     expect((await call('/api/notes', 'admin', { headers: { 'X-Customer-Id': '20' } })).status).toBe(403);
     expect((await call('/api/notes', 'admin', { headers: { 'X-Customer-Id': '10' } })).status).toBe(200);
     expect((await call('/api/notes', 'user-one', { headers: { 'X-Customer-Id': 'oops' } })).status).toBe(400);
+  });
+
+  it('requires an explicit customer header after /me accepts ADMIN with an allowlisted customer', async () => {
+    const upstream = createServer((request, response) => {
+      expect(request.url).toBe('/api/v2/user/me');
+      expect(request.headers.authorization).toBe('Bearer accepted-admin');
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ ...owner, role: 'ADMIN', customerId: 10 }));
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    try {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      const serverUrl = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+      server = createNotesServer({
+        validator: createWallboardValidator({ serverUrl }), store,
+        allowedOrigin: 'http://localhost:5173', allowWrites: true, allowedAdminCustomerIds: [10],
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      expect((await call('/api/session', 'accepted-admin')).status).toBe(403);
+      expect((await call('/api/notes', 'accepted-admin')).status).toBe(403);
+      expect((await write('Must not inherit a customer', 'accepted-admin')).status).toBe(403);
+      const selected = await call('/api/session', 'accepted-admin', { headers: { 'X-Customer-Id': '10' } });
+      expect(selected.status).toBe(200);
+      expect((await selected.json()).scope.customerId).toBe(10);
+      expect((await (await call('/api/notes', 'accepted-admin', { headers: { 'X-Customer-Id': '10' } })).json()).notes).toEqual([]);
+    } finally {
+      upstream.closeAllConnections();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
   });
 
   it('uses an exact CORS allowlist and an endpoint-specific method allowlist', async () => {
