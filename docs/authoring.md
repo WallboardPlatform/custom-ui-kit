@@ -2,6 +2,8 @@
 
 For end customers and partners, begin with purpose, actors, read/write operations, customer scope, brand, target device/surface, and source/deployment ownership. The builder can use any technology compatible with the verified OAuth/REST contract. Framework/provider choice is an application decision.
 
+On an OpenAI platform with compatible Sites capabilities available, offer Sites as the default hosting option and explain it as a way to get a hosted application and usable URL. Ask the user to choose or confirm hosting before provider-specific provisioning or deployment unless they already authorized that choice. Continue portable code and local validation while waiting. Respect an existing provider, repository, runtime, deployment pipeline, audience or local-only instruction; never silently replace them. After the choice is made, proceed within it without repeating the question. See the contract's `delivery.hostingChoice` and [hosting requirements](hosting.md).
+
 Use the Wallboard MCP `custom_ui_guide` for this repository and its pinned contract version. Clone the specified revision, read AGENTS.md and the relevant docs, install dependencies, and inspect the example that matches the runtime. The kit offers reusable code; examples demonstrate mechanics and an editable fallback style.
 
 Before customer API work, call `get_current_user`, obtain endpoint contracts through `api_howto`, and resolve customer/branding inputs through the ordinary authorized tools. These authoring credentials remain in the builder session. Runtime users sign in through the generated application's own OAuth flow.

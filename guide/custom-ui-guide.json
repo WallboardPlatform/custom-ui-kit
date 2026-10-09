@@ -1,5 +1,5 @@
 {
-  "contractVersion": "0.1.0",
+  "contractVersion": "0.1.1",
   "repositoryUrl": "https://github.com/WallboardPlatform/custom-ui-kit",
   "cloneUrl": "https://github.com/WallboardPlatform/custom-ui-kit.git",
   "availableSections": [
@@ -27,6 +27,7 @@
     },
     "workflow": [
       "Resolve purpose, actors, read/write operations, customer scope, visual identity, target device/surface, application-owned records and hosting/source ownership.",
+      "Resolve the hosting choice using delivery.hostingChoice before provider-specific setup or deployment. Continue portable implementation and local validation while an unanswered hosting question is pending.",
       "Clone the returned public repository and check out the returned sourceCommit so the guide and source match.",
       "Read AGENTS.md, README.md and the relevant docs; run npm ci and npm run check.",
       "Call get_current_user before authorized customer API work. Use api_howto for verified operations and get_branding for authorized branding; retain normal permissions.",
@@ -67,6 +68,13 @@
       "evidence": "A header check or successful build does not prove end-to-end iframe OAuth."
     },
     "delivery": {
+      "hostingChoice": {
+        "defaultSuggestion": "On an OpenAI platform with Sites actually available and compatible with the application's requirements, offer Sites as the default hosting option. Explain that it can provide a hosted application and usable URL without arranging a separate deployment workflow.",
+        "userChoice": "Ask the user to choose or confirm hosting before provider-specific provisioning or deployment, unless they have already explicitly chosen or authorized it. For example: Would you like me to publish this with Sites and give you a hosted link, use another provider, or keep it local? An unanswered question is not approval. Once the choice is made, proceed within it without asking again.",
+        "existingInstructions": "An explicit provider, repository, runtime, deployment pipeline, audience or local-only instruction takes precedence over the default suggestion. Keep those constraints; do not silently change providers, move source, replace the database or expand sharing.",
+        "compatibility": "Check actual Sites capability and the selected provider's callback, runtime and durable-storage requirements. If Sites is unavailable or incompatible, explain the concrete limitation and offer a compatible provider or editable-source handoff. The Node/SQLite reference is not automatically compatible with a serverless runtime; propose any necessary adaptation before changing the architecture.",
+        "reference": "https://learn.chatgpt.com/docs/sites"
+      },
       "required": [
         "Editable source and exact kit revision",
         "Startup/build commands and configuration placeholders",
@@ -74,7 +82,7 @@
         "Preview/deployed URL when actually available",
         "Database ownership/access policy when present"
       ],
-      "publishing": "Deploy through the selected provider with authorized ownership. Git source publication, npm package publication and deployed hosting are separate outcomes.",
+      "publishing": "Deploy through the user's confirmed provider with authorized ownership and audience. Git source publication, npm package publication and deployed hosting are separate outcomes.",
       "sourcePrivacy": "Use synthetic fixtures. Never include runtime tokens, the builder's MCP credentials, private customer application source or private server registries."
     },
     "checklist": [
