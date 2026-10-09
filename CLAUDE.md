@@ -1,0 +1,1 @@
+Follow [AGENTS.md](AGENTS.md). Install with `npm ci`; `npm run check` type-checks, tests, builds the SDK, and bundles both browser examples. Node 22.13+ is required for the optional SQLite example. The browser SDK itself uses standard Web APIs.

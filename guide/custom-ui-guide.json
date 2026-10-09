@@ -1,0 +1,100 @@
+{
+  "contractVersion": "0.1.0",
+  "repositoryUrl": "https://github.com/WallboardPlatform/custom-ui-kit",
+  "cloneUrl": "https://github.com/WallboardPlatform/custom-ui-kit.git",
+  "availableSections": [
+    "overview",
+    "workflow",
+    "authentication",
+    "api",
+    "backend",
+    "embedding",
+    "delivery",
+    "checklist",
+    "all"
+  ],
+  "sections": {
+    "overview": {
+      "goal": "Build an externally hosted Wallboard-connected application for an end customer or partner using their chosen frontend, backend, database and hosting.",
+      "audience": [
+        "End customers building applications for themselves",
+        "Partners building applications for customers",
+        "Developers and execution-capable AI builders"
+      ],
+      "source": "Public, versioned integration code, optional Vue components, plain TypeScript and Vue examples, and a Node/SQLite example.",
+      "runtime": "Each runtime user authenticates through the application's own Wallboard OAuth flow. Wallboard API permissions and application database permissions both apply.",
+      "capabilityBoundary": "MCP supplies authoring guidance and ordinary authenticated API knowledge. The builder owns source, preview, deployment and artifacts. A Custom UI is an externally hosted web application; uploadable signage widget packages use custom_app_guide."
+    },
+    "workflow": [
+      "Resolve purpose, actors, read/write operations, customer scope, visual identity, target device/surface, application-owned records and hosting/source ownership.",
+      "Clone the returned public repository and check out the returned sourceCommit so the guide and source match.",
+      "Read AGENTS.md, README.md and the relevant docs; run npm ci and npm run check.",
+      "Call get_current_user before authorized customer API work. Use api_howto for verified operations and get_branding for authorized branding; retain normal permissions.",
+      "Choose a browser-only app for direct Wallboard operations, or add a backend/database for application-owned workflow state, jobs or server-side credentials.",
+      "Use npm run build, then npm run new-app -- <vue|vanilla> <new-directory> for a standalone editable project. Its vendored SDK requires no published npm package.",
+      "Reuse connection code and platform components; adapt presentation to the application's brand and workflow. Other frameworks can use the same browser core or OAuth/REST contract.",
+      "Validate using synthetic fixtures and inspect the actual UI. Perform live writes only when explicitly authorized against designated test records.",
+      "Deploy through the chosen provider's actual process and prove its callback/runtime/storage requirements before describing it as supported."
+    ],
+    "authentication": {
+      "browser": "createWallboardClient handles OAuth discovery, optional public-client registration, PKCE, one-use callback state, tab-local sessions, single-flight rotating refresh and a verified /api/v2/user/me profile.",
+      "configuration": "Use a configured public clientId when DCR is unavailable. Register the exact callback URI. Default callbacks use the origin; the entrypoint must handle that URL.",
+      "session": "Use one client per application/server. Default sessionStorage is tab-local; shared storage requires coordinated refresh. Never put a confidential client secret or the builder's MCP token in frontend source.",
+      "authority": "Verified API responses establish identity. Decoded JWT display hints never establish authorization. The app backend validates the runtime user's token independently.",
+      "backend": "Use createWallboardValidator with a configured trusted server. Its online /me validation follows no redirects and caches no identity by default.",
+      "localVerification": "JWKS-only validation needs a verified signing-key format and explicit issuer/audience/key refresh/revocation policy. Check the deployed version; resource audience behavior must be verified rather than inferred."
+    },
+    "api": {
+      "contractSource": "Use the existing api_howto, target /v3/api-docs and public API reference for endpoint/body contracts. Typed kit helpers are selected fields, not a second complete schema.",
+      "helpers": "Authenticated transport, explicit forCustomer(customerId), WB/FIELDS/entity subsets, WBQL, pagination, datasource and media helpers.",
+      "tenantScope": "Generic tenant requests need an explicit customerId; instance:true is a deliberate server-wide operation. Global admins select a customer before tenant queries.",
+      "permissions": "Wallboard enforces role, customer, team and read-only restrictions. Preserve 403 outcomes; do not search for a bypass.",
+      "writes": "Verify the actual write contract, replacement/cascade behavior and requested user intent. No automatic retry of uncertain network writes.",
+      "ui": "Use loading/empty/error/forbidden states and discard superseded customer/filter requests. Branding is an explicit application input."
+    },
+    "backend": {
+      "example": "examples/node-notes provides Node HTTP and parameterized SQLite CRUD scoped to configured server, customer and user.",
+      "authorization": "resolveCustomerScope denies global-admin database access unless an application-owned allowlist authorizes the requested customer. The example write policy is disabled by default.",
+      "storage": "The app owns its database schema, retention and access rules. Use a durable database supported by the provider; an ephemeral SQLite file is not production persistence.",
+      "sessionBoundary": "The shipped backend accepts bearer tokens per request. A cookie-session BFF requires a complete callback, secure session, CSRF and logout implementation.",
+      "adaptation": "Other backend languages or provider runtimes can implement the same validated /me identity and application data boundary; Node is an executable reference."
+    },
+    "embedding": {
+      "standalone": "Prove standalone login and hosting first.",
+      "frameRequirements": "Verify response frame policy, the specific Wallboard surface's sandbox, browser storage and interactive input. CMS and signage frames have different capabilities.",
+      "login": "The current kit requires top-level sign-in and rejects framed signIn. Popup/callback handoff is a separate integration that must validate origin/state.",
+      "productBoundary": "The guide adds no configurable CMS menu/panel or new signage surface. Use an existing verified URL flow, or implement that product feature separately.",
+      "evidence": "A header check or successful build does not prove end-to-end iframe OAuth."
+    },
+    "delivery": {
+      "required": [
+        "Editable source and exact kit revision",
+        "Startup/build commands and configuration placeholders",
+        "Validation results and explicit unverified runtime behavior",
+        "Preview/deployed URL when actually available",
+        "Database ownership/access policy when present"
+      ],
+      "publishing": "Deploy through the selected provider with authorized ownership. Git source publication, npm package publication and deployed hosting are separate outcomes.",
+      "sourcePrivacy": "Use synthetic fixtures. Never include runtime tokens, the builder's MCP credentials, private customer application source or private server registries."
+    },
+    "checklist": [
+      "SDK and generated project type-check and build; meaningful auth/customer/database tests pass.",
+      "Inspect signed-out, loading, empty, error, long-name and mobile UI states.",
+      "Prove OAuth callback, refresh, logout policy and rejected/expired credentials on the deployed origin before claiming live login works.",
+      "Prove customer scope, forbidden behavior and any application database isolation.",
+      "Confirm consequential writes against verified contracts and designated test records.",
+      "Prove provider routing, runtime and durable storage assumptions.",
+      "Report embedding as verified only after the actual Wallboard iframe/login flow passes."
+    ]
+  },
+  "relatedTools": [
+    "get_current_user",
+    "api_howto",
+    "api_workflows",
+    "get_branding",
+    "api_read",
+    "api_write",
+    "custom_app_guide"
+  ],
+  "finalAnswerContract": "Return editable source location, exact kit revision, what was built, startup/build/configuration steps, validation outcomes and actual preview/deployment URL. Clearly identify live login, provider/database durability and iframe behaviors that remain unverified."
+}

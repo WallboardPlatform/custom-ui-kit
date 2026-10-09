@@ -1,0 +1,43 @@
+{
+  "name": "@wallboard/custom-ui-kit",
+  "version": "0.1.0",
+  "description": "Portable source kit for customer and partner Wallboard applications",
+  "type": "module",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/WallboardPlatform/custom-ui-kit.git" },
+  "engines": { "node": ">=22.13.0" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./browser": { "types": "./dist/browser/index.d.ts", "import": "./dist/browser/index.js" },
+    "./api": { "types": "./dist/api/index.d.ts", "import": "./dist/api/index.js" },
+    "./backend": { "types": "./dist/backend/index.d.ts", "import": "./dist/backend/index.js" },
+    "./vue": { "types": "./dist/vue/index.d.ts", "import": "./dist/vue/index.js" },
+    "./theme.css": "./src/vue/theme.css"
+  },
+  "files": ["dist", "src/vue/theme.css", "guide", "docs", "README.md", "LICENSE"],
+  "sideEffects": ["*.css"],
+  "scripts": {
+    "dev:vue": "vite --config examples/vue-device-board/vite.config.ts",
+    "dev:vanilla": "vite --config examples/vanilla-device-board/vite.config.ts",
+    "dev:backend": "node --experimental-sqlite --import tsx examples/node-notes/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "build:examples": "vite build --config examples/vue-device-board/vite.config.ts && vite build --config examples/vanilla-device-board/vite.config.ts",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build && npm run build:examples",
+    "new-app": "node scripts/new-app.mjs",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": { "vue": "^3.5.0" },
+  "peerDependenciesMeta": { "vue": { "optional": true } },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10",
+    "vue": "^3.5.43",
+    "vue-tsc": "^3.0.0",
+    "tsx": "^4.23.15"
+  }
+}
