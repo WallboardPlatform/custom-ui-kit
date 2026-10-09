@@ -175,6 +175,21 @@ describe('application authorization helpers', () => {
     expect(resolveCustomerScope(admin, { customerId: 43, allowedAdminCustomerIds: [43] }).customerId).toBe(43);
   });
 
+  it.each([undefined, 0, -1, 42.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])(
+    'requires an explicit positive customer choice for ADMIN: %s', (customerId) => {
+      const admin = { ...identity, role: 'ADMIN' as const };
+      expect(() => resolveCustomerScope(admin, { customerId, allowedAdminCustomerIds: [42] }))
+        .toThrow(expect.objectContaining({ code: 'forbidden', statusCode: 403 }));
+    },
+  );
+
+  it('does not inherit an ADMIN customer even when that customer is allowlisted', () => {
+    const admin = { ...identity, role: 'ADMIN' as const };
+    expect(() => resolveCustomerScope(admin, { allowedAdminCustomerIds: [42] }))
+      .toThrow(expect.objectContaining({ code: 'forbidden', statusCode: 403 }));
+    expect(resolveCustomerScope(admin, { customerId: 42, allowedAdminCustomerIds: [42] }).customerId).toBe(42);
+  });
+
   it('denies read-only identities and viewing/device roles', () => {
     expect(() => assertWritableIdentity(identity)).not.toThrow();
     expect(() => assertWritableIdentity({ ...identity, readOnly: true })).toThrow();
