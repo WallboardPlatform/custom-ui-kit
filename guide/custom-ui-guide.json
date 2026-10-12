@@ -38,7 +38,7 @@
       "Deploy through the chosen provider's actual process and prove its callback/runtime/storage requirements before describing it as supported."
     ],
     "authentication": {
-      "browser": "createWallboardClient handles OAuth discovery, optional public-client registration, PKCE, one-use callback state, tab-local sessions, single-flight rotating refresh and a verified /api/v2/user/me profile.",
+      "browser": "createWallboardClient handles standalone OAuth discovery, optional public-client registration, PKCE, one-use callback state, tab-local sessions, single-flight rotating refresh and a verified /api/v2/user/me profile. createEmbeddedWallboardClient uses a compatible CMS host's MessagePort, holds access credentials only in memory, and verifies the same profile without its own OAuth or browser storage.",
       "configuration": "Use a configured public clientId when DCR is unavailable. Register the exact callback URI. Default callbacks use the origin; the entrypoint must handle that URL.",
       "session": "Use one client per application/server. Default sessionStorage is tab-local; shared storage requires coordinated refresh. Never put a confidential client secret or the builder's MCP token in frontend source.",
       "authority": "Verified API responses establish identity. Decoded JWT display hints never establish authorization. The app backend validates the runtime user's token independently.",
@@ -63,7 +63,7 @@
     "embedding": {
       "standalone": "Prove standalone login and hosting first.",
       "frameRequirements": "Verify response frame policy, the specific Wallboard surface's sandbox, browser storage and interactive input. CMS and signage frames have different capabilities.",
-      "login": "The current kit requires top-level sign-in and rejects framed signIn. Popup/callback handoff is a separate integration that must validate origin/state.",
+      "login": "Standalone signIn requires top-level navigation. CMS My Apps uses createEmbeddedWallboardClient and the host protocol; the matching CMS feature must be deployed. The host supplies an ordinary current-user JWT, retains refresh credentials, and rechecks each handoff. The app keeps the user's normal API authority; selected customer is a request default, and a copied JWT retains normal validity after app closure/removal.",
       "productBoundary": "The guide adds no configurable CMS menu/panel or new signage surface. Use an existing verified URL flow, or implement that product feature separately.",
       "evidence": "A header check or successful build does not prove end-to-end iframe OAuth."
     },

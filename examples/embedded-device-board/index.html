@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Fleet overview</title>
+  <style>/* EMBEDDED_STYLES */</style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">WALLBOARD CUSTOM UI</p><h1 id="app-name">Fleet overview</h1><p id="identity" class="muted">A read-only view of your screens.</p></div>
+      <span class="read-only">Read-only overview</span>
+    </header>
+    <p id="message" role="status" aria-live="polite">Connecting to Wallboard…</p>
+    <section id="dashboard" hidden>
+      <div class="stats" aria-label="Screens on this page">
+        <article><span class="muted">Loaded screens</span><strong id="loaded">0</strong></article>
+        <article><span class="muted">Online</span><strong id="online">0</strong></article>
+        <article><span class="muted">Not online</span><strong id="offline">0</strong></article>
+      </div>
+      <div class="toolbar">
+        <label class="search">Search this page<input id="search" type="search" placeholder="Screen name" autocomplete="off"></label>
+        <label>Status<select id="status"><option value="">All statuses</option><option value="ONLINE">Online</option><option value="OFFLINE">Not online</option></select></label>
+        <button id="refresh" type="button">Refresh screens</button>
+      </div>
+      <div id="devices" class="devices"></div>
+      <p id="empty" class="empty" hidden></p>
+      <footer><span id="updated" class="muted"></span><nav aria-label="Screen list pages"><button id="previous" type="button">Previous</button><span id="page-count"></span><button id="next" type="button">Next</button></nav></footer>
+    </section>
+  </main>
+  <script>/* EMBEDDED_SCRIPT */</script>
+</body>
+</html>

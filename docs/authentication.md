@@ -12,6 +12,24 @@ Sessions use tab-local `sessionStorage` by default. Refresh tokens rotate, so `g
 
 The default requests a short refresh session (`keepSignedIn: false`). The application can explicitly offer a longer session through the client's sign-in option. Expired, rejected or unreadable storage must produce a sign-in/error state, not silently bypass callback checks.
 
+## Embedded CMS session
+
+```ts
+import { createEmbeddedWallboardClient, WB, type WbDevice, type WbPage } from '@wallboard/custom-ui-kit';
+
+const client = createEmbeddedWallboardClient();
+await client.initialize();
+const devices = await client.api.get<WbPage<WbDevice>>(WB.device, {
+  query: { page: 0, size: 20, select: 'id,name,deviceStatus' },
+});
+```
+
+Use this adapter for a Custom UI launched from the compatible CMS My Apps host. The host supplies its exact origin and one-use launch nonce in bootstrap query parameters. The child creates one MessageChannel and transfers a port to that origin; all token requests/replies then use the accepted port. The adapter keeps credentials only in memory, verifies the user through `/api/v2/user/me`, coalesces renewal requests, and asks the host again near expiry or after a 401. It never reads browser storage, performs OAuth, or receives the CMS refresh token. `signIn()` is unavailable; `signOut()`/`dispose()` close only this app connection.
+
+`getContext()` identifies the launched app and selected customer. `state.customerId` and ordinary API request defaults use that selection, while `state.user` remains the verified account identity. Explicit customer or instance requests still follow the existing API client's rules. The host context does not downscope the supplied JWT: this is a trusted alternate frontend with the user's normal API permissions, including global administrator authority. Closing/removing the app stops further handoffs; a copied access token retains normal validity. Do not promise app-specific revocation or a separate token lifetime.
+
+The application may send `await client.getToken()` as a bearer to its own configured backend. Use the same online validator below and enforce database ownership there; a selected customer supplied by the browser is not an authorization grant. Never write tokens to URLs, logs, source or persistent application records. An opaque iframe's `null` origin is not identity and cannot prove the final hosted provider origin.
+
 ## Application backend
 
 ```ts
