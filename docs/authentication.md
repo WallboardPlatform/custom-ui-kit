@@ -28,6 +28,8 @@ Use this adapter for a Custom UI launched from the compatible CMS My Apps host. 
 
 `getContext()` identifies the launched app and selected customer. `state.customerId` and ordinary API request defaults use that selection, while `state.user` remains the verified account identity. Explicit customer or instance requests still follow the existing API client's rules. The host context does not downscope the supplied JWT: this is a trusted alternate frontend with the user's normal API permissions, including global administrator authority. Closing/removing the app stops further handoffs; a copied access token retains normal validity. Do not promise app-specific revocation or a separate token lifetime.
 
+In v1, global ADMIN may launch `PLATFORM` apps but cannot launch `CUSTOMER`-owned apps, whether hosted URLs or uploaded bundles. ADMIN can still inspect and manage customer app metadata; launch returns 403 before the app receives that credential. Customer-owned apps run through a genuine customer-user session. Customer selection and frontend View As do not narrow the administrator token, and impersonation preview cannot launch embedded apps. A real backend customer-preview/delegation session is a separate step 2, not an available v1 login mode.
+
 The application may send `await client.getToken()` as a bearer to its own configured backend. Use the same online validator below and enforce database ownership there; a selected customer supplied by the browser is not an authorization grant. Never write tokens to URLs, logs, source or persistent application records. An opaque iframe's `null` origin is not identity and cannot prove the final hosted provider origin.
 
 ## Application backend

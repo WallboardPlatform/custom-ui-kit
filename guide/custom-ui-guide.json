@@ -1,5 +1,5 @@
 {
-  "contractVersion": "0.1.2",
+  "contractVersion": "0.1.3",
   "repositoryUrl": "https://github.com/WallboardPlatform/custom-ui-kit",
   "cloneUrl": "https://github.com/WallboardPlatform/custom-ui-kit.git",
   "availableSections": [
@@ -65,7 +65,9 @@
     "embedding": {
       "standalone": "For standalone apps, prove top-level OAuth and hosting. CMS embedded apps instead prove the host launch, MessagePort, verified profile and renewal; do not add an iframe OAuth flow.",
       "frameRequirements": "Verify response frame policy, the specific Wallboard surface's sandbox, browser storage and interactive input. CMS and signage frames have different capabilities.",
-      "login": "Standalone signIn rejects framed login and requires top-level navigation. CMS My Apps uses createEmbeddedWallboardClient and the host protocol; the matching CMS feature must be deployed. The host supplies an ordinary current-user JWT over a private MessagePort, retains refresh credentials, and rechecks each handoff. The app keeps the user's normal API authority, including global ADMIN authority; selected customer is a request default, and a copied JWT retains normal validity after app closure/removal.",
+      "login": "Standalone signIn rejects framed login and requires top-level navigation. CMS My Apps uses createEmbeddedWallboardClient and the host protocol; the matching CMS feature must be deployed. The host supplies an ordinary current-user JWT over a private MessagePort, retains refresh credentials, and rechecks each handoff. Allowed apps keep the user's normal API authority; ADMIN tokens are handed only to PLATFORM apps and retain global authority. Selected customer is a request default, and a copied JWT retains normal validity after app closure/removal.",
+      "executionPolicy": "In v1 the real global ADMIN cannot launch CUSTOMER-owned apps, for either hosted URLs or HTML bundles. ADMIN may still list and manage their metadata; launch returns 403. Selecting a customer, confirming trust or using frontend impersonation does not narrow the ADMIN JWT or bypass this rule. Run customer-owned apps through a genuine customer-user session. PLATFORM apps remain eligible for explicitly trusted ADMIN launches; do not automatically copy/re-register a refused customer app as a platform workaround.",
+      "customerPreview": "A real backend customer-preview/delegation session is a separate step 2 and is not available in v1. Frontend View As changes presentation, not the execution token.",
       "productBoundary": "The deployed Custom UI feature supports named My Apps entries from hosted HTTPS URLs or uploaded HTML bundles. Customer-owned apps remain private to that customer; ADMIN platform apps may be assigned to selected customers or explicitly published to all. This is separate from display CustomApp/widget packaging and permissions.",
       "isolation": "CMS runs an opaque sandbox with allow-scripts and no allow-same-origin. Do not add storage, cookie-session, popup or sandbox exceptions to make a provider work. Null origin is not provider identity. Uploaded documents also require the resource server's enforced CSP sandbox; verify asset/API CORS and relative paths. See docs/hosting.md and the portable embedded example.",
       "evidence": "An API registration, header check or successful build does not prove the actual CMS iframe flow. Verify the matching deployed frontend/backend/storage/proxy and the chosen provider separately."
