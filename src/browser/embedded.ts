@@ -91,7 +91,8 @@ export function createEmbeddedWallboardClient(options: EmbeddedWallboardClientOp
   if ((options.parentOrigin !== undefined && options.parentOrigin !== bootstrap.parentOrigin) ||
       (options.nonce !== undefined && options.nonce !== bootstrap.nonce)) throw new EmbeddedHostError('INVALID_BOOTSTRAP', 'The embedded UI launch does not match its configured host.');
   const connectionTimeoutMs = timeout(options.connectionTimeoutMs, 15_000);
-  const requestTimeoutMs = timeout(options.requestTimeoutMs, 15_000);
+  // The CMS host allows 30 seconds for launch revalidation and session renewal.
+  const requestTimeoutMs = timeout(options.requestTimeoutMs, 35_000);
   const fetcher = options.fetch ?? globalThis.fetch;
   const listeners = new Set<(state: ClientState) => void>();
   const controller = new AbortController();

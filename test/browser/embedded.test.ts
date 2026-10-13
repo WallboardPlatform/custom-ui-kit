@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { setImmediate as nextMessageTurn } from 'node:timers/promises';
 import { createEmbeddedWallboardClient, EMBEDDED_UI_PROTOCOL, EmbeddedHostError, readEmbeddedBootstrap, type EmbeddedWallboardClient } from '../../src/browser/embedded.js';
 
 const parentOrigin = 'https://wallboard.example.test';
@@ -28,6 +29,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const client of clients.splice(0)) client.dispose();
   for (const port of hostPorts.splice(0)) port.close();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -120,6 +122,38 @@ describe('embedded bootstrap and identity', () => {
 });
 
 describe('embedded token renewal and cancellation', () => {
+  it.each([
+    { requestTimeoutMs: undefined, expected: 'authenticated' },
+    { requestTimeoutMs: 15_000, expected: 'TOKEN_TIMEOUT' },
+  ])('handles a host response within its 30-second budget with request timeout $requestTimeoutMs', async ({ requestTimeoutMs, expected }) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { client, fetcher } = makeClient({ requestTimeoutMs });
+    const hosted = await host(client, false);
+    const completion = hosted.initialization.then(state => state.status, (error: unknown) => {
+      if (!(error instanceof EmbeddedHostError)) throw error;
+      return error.code;
+    });
+    hosted.port.onmessage = event => {
+      hosted.requests.push(event.data);
+      setTimeout(() => hosted.port.postMessage(envelope({
+        type: 'access-token', requestId: event.data.requestId, accessToken: jwt(), expiresAt: Date.now() + 1_800_000,
+      })), 20_000);
+    };
+    for (let turn = 0; hosted.requests.length === 0 && turn < 20; turn++) await nextMessageTurn();
+    expect(hosted.requests).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(20_000);
+    for (let turn = 0; client.getState().status === 'checking' && turn < 20; turn++) await nextMessageTurn();
+    expect(await completion).toBe(expected);
+    expect(client.getState().status).toBe(expected === 'authenticated' ? 'authenticated' : 'error');
+    if (expected === 'authenticated') {
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(client.getContext()).toEqual(context);
+    } else {
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(client.getContext()).toBeNull();
+    }
+  });
+
   it('uses host tokens against a real noncredentialed HTTP fixture, including renewal after a 401', async () => {
     const requests: { path: string; origin?: string; authorization?: string }[] = [];
     const server = createServer((request, response) => {
