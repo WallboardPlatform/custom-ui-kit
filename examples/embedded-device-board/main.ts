@@ -1,5 +1,6 @@
-import { createEmbeddedWallboardClient, WB, type WbDevice, type WbPage } from '@wallboard/custom-ui-kit';
+import { createEmbeddedWallboardClient, WB, type EmbeddedAppManifest, type WbDevice, type WbPage } from '@wallboard/custom-ui-kit';
 import './style.css';
+import manifest from './wallboard-ui.json';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 async function start() {
@@ -7,7 +8,7 @@ async function start() {
   let page = 0;
   let pages = 0;
   let loading = false;
-  const client = createEmbeddedWallboardClient();
+  const client = createEmbeddedWallboardClient({ manifest: manifest as EmbeddedAppManifest });
 
   function render() {
     const query = element<HTMLInputElement>('search').value.trim().toLocaleLowerCase();

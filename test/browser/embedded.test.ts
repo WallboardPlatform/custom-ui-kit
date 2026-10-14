@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createEmbeddedWallboardClient, EMBEDDED_UI_PROTOCOL, EMBEDDED_UI_VERSION, EmbeddedHostError, readEmbeddedBootstrap, type EmbeddedWallboardClient } from '../../src/browser/embedded.js';
+import { createEmbeddedWallboardClient, EMBEDDED_UI_PROTOCOL, EMBEDDED_UI_VERSION, EmbeddedHostError, readEmbeddedBootstrap, type EmbeddedAppManifest, type EmbeddedWallboardClient } from '../../src/browser/embedded.js';
 
 const parentOrigin = 'https://wallboard.example.test';
 const nonce = 'a'.repeat(64);
 const profile = { email: 'person@example.test', name: 'Verified user', role: 'OWNER', customerId: 42, readOnly: false };
-const context = { appId: 17, name: 'Fleet overview', customerId: 42, serverUrl: parentOrigin, readOnly: false,
-  apiPermissions: [{ method: 'GET', path: '/api/v2/device', description: 'Read devices' }], user: profile };
+const manifest: EmbeddedAppManifest = { readOnly: false, operations: [{ method: 'GET', path: '/api/v2/device', description: 'Read devices' }] };
+const context = { appId: 17, name: 'Fleet overview', customerId: 42, serverUrl: parentOrigin, readOnly: false, manifest, user: profile };
 const envelope = (message: object) => ({ protocol: EMBEDDED_UI_PROTOCOL, version: EMBEDDED_UI_VERSION, ...message });
 const clients: EmbeddedWallboardClient[] = [];
 const hostPorts: MessagePort[] = [];
@@ -29,13 +29,13 @@ afterEach(() => {
   for (const port of hostPorts.splice(0)) port.close();
   vi.useRealTimers(); vi.unstubAllGlobals();
 });
-function makeClient(options: Parameters<typeof createEmbeddedWallboardClient>[0] = {}) {
-  const client = createEmbeddedWallboardClient(options); clients.push(client); return client;
+function makeClient(options: Partial<Parameters<typeof createEmbeddedWallboardClient>[0]> = {}) {
+  const client = createEmbeddedWallboardClient({ manifest, ...options }); clients.push(client); return client;
 }
 async function host(client: EmbeddedWallboardClient, suppliedContext: object = context, respond = true) {
   const initialization = client.initialize();
   expect(connectMessage?.origin).toBe(parentOrigin);
-  expect(connectMessage?.data).toEqual(envelope({ type: 'connect', nonce }));
+  expect(connectMessage?.data).toEqual(envelope({ type: 'connect', nonce, manifest: expect.any(Object) }));
   expect(connectMessage?.ports).toHaveLength(1);
   const port = connectMessage!.ports[0] as MessagePort;
   const requests: Record<string, unknown>[] = [];
@@ -48,13 +48,78 @@ async function host(client: EmbeddedWallboardClient, suppliedContext: object = c
 }
 
 describe('tokenless embedded bootstrap and identity', () => {
+  it('declares a frozen snapshot and waits for approval without identity or API access', async () => {
+    const supplied: { readOnly: boolean; operations: { method: 'GET'; path: string; description: string }[] } = {
+      readOnly: false, operations: [{ method: 'GET', path: '/api/v2/device', description: 'Read devices' }],
+    };
+    const client = makeClient({ manifest: supplied });
+    supplied.readOnly = true; supplied.operations[0]!.path = '/api/user';
+    let approved = false;
+    const initialization = client.initialize().then(state => { approved = true; return state; });
+    expect(connectMessage?.data).toEqual(envelope({ type: 'connect', nonce, manifest }));
+    expect(client.getState().status).toBe('checking'); expect(client.getState().user).toBeNull();
+    expect(client.getContext()).toBeNull(); expect(() => client.api).toThrow('Initialize');
+    await new Promise(resolve => setTimeout(resolve, 25)); expect(approved).toBe(false);
+    const port = connectMessage!.ports[0] as MessagePort;
+    port.postMessage(envelope({ type: 'context', context }));
+    expect((await initialization).status).toBe('authenticated');
+    expect(client.getContext()?.manifest).toEqual(manifest); expect(fetcher).not.toHaveBeenCalled();
+  });
+  it('allows five minutes for approval separately from API request timeouts', async () => {
+    vi.useFakeTimers(); const client = makeClient({ requestTimeoutMs: 10 });
+    const initialization = client.initialize(); const rejected = expect(initialization).rejects.toMatchObject({ code: 'CONNECTION_TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(299_999); expect(client.getState().status).toBe('checking');
+    expect(client.getContext()).toBeNull(); expect(fetcher).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); await rejected;
+  });
+  it.each([
+    undefined, [], { readOnly: false, operations: [], unknown: true }, { readOnly: 'false', operations: [] },
+    { readOnly: false, operations: [{ method: 'get', path: '/api/device' }] },
+    { readOnly: false, operations: [{ method: 'GET', path: '/api/{resource}' }] },
+    { readOnly: false, operations: [{ method: 'GET', path: '/api/device/{id}/' }] },
+    { readOnly: false, operations: [{ method: 'GET', path: '/api/device', headers: {} }] },
+    { readOnly: false, operations: [{ method: 'GET', path: '/api/device', description: null }] },
+    { readOnly: false, operations: [{ method: 'GET', path: '/api/device', description: 'x'.repeat(501) }] },
+    { readOnly: false, operations: [{ method: 'GET', path: '/api/device' }, { method: 'GET', path: '/api/device' }] },
+    { readOnly: false, operations: Array.from({ length: 129 }, (_, index) => ({ method: 'GET', path: `/api/device/id-${index}` })) },
+  ])('rejects an invalid manifest before connecting: %j', invalid => {
+    expect(() => makeClient({ manifest: invalid as EmbeddedAppManifest })).toThrow(); expect(connectMessage).toBeNull();
+  });
+  it('accepts an empty object-wrapped operations list for apps without Wallboard API access', async () => {
+    const empty = { readOnly: true, operations: [] }; const client = makeClient({ manifest: empty });
+    const hosted = await host(client, { ...context, manifest: empty, readOnly: true });
+    expect((await hosted.initialization).readOnly).toBe(true); expect(client.getContext()?.manifest).toEqual(empty);
+  });
+  it.each([
+    { ...manifest, readOnly: true },
+    { ...manifest, operations: [{ method: 'GET', path: '/api/content' }] },
+    { ...manifest, operations: [{ method: 'GET', path: '/api/v2/device', description: 'A different description' }] },
+  ])('rejects host approval for a different manifest: %j', approvedManifest => {
+    const client = makeClient(); return host(client, { ...context, manifest: approvedManifest })
+      .then(hosted => expect(hosted.initialization).rejects.toMatchObject({ code: 'MANIFEST_MISMATCH' }));
+  });
+  it('refuses host write mode for a declared read-only app', async () => {
+    const readOnlyManifest = { ...manifest, readOnly: true }; const client = makeClient({ manifest: readOnlyManifest });
+    const hosted = await host(client, { ...context, manifest: readOnlyManifest, readOnly: false });
+    await expect(hosted.initialization).rejects.toMatchObject({ code: 'INVALID_MESSAGE' });
+  });
+  it('clears a refused or closed pending approval without exposing profile or fetching', async () => {
+    const client = makeClient(); const initialization = client.initialize();
+    const port = connectMessage!.ports[0] as MessagePort;
+    port.postMessage(envelope({ type: 'error', code: 'CONSENT_DENIED', message: 'The user declined this app.' }));
+    await expect(initialization).rejects.toMatchObject({ code: 'CONSENT_DENIED' });
+    expect(client.getContext()).toBeNull(); expect(client.getState().user).toBeNull();
+    const waiting = makeClient(); const pendingApproval = waiting.initialize(); const rejected = expect(pendingApproval).rejects.toThrow('closed');
+    waiting.dispose(); await rejected; expect(waiting.getContext()).toBeNull(); expect(fetcher).not.toHaveBeenCalled();
+  });
   it('uses trusted host identity without API fetch, tokens, OAuth or storage', async () => {
     const client = makeClient(); const hosted = await host(client); const state = await hosted.initialization;
     expect(state.status).toBe('authenticated'); expect(state.user).toEqual(profile);
     expect(state.displayIdentity).toBeNull(); expect(state.customerId).toBe(42);
     expect(state).not.toHaveProperty('accessToken'); expect(state).not.toHaveProperty('refreshToken');
     expect(client.getContext()).toEqual(context); expect(Object.isFrozen(client.getContext())).toBe(true);
-    expect(Object.isFrozen(client.getContext()?.apiPermissions)).toBe(true);
+    expect(Object.isFrozen(client.getContext()?.manifest)).toBe(true);
+    expect(Object.isFrozen(client.getContext()?.manifest.operations)).toBe(true);
     expect(hosted.requests).toHaveLength(0); expect(fetcher).not.toHaveBeenCalled();
     await expect(client.signIn()).rejects.toMatchObject({ code: 'HOST_MANAGED_AUTH' });
     await expect(client.getToken()).rejects.toMatchObject({ code: 'API_PROXY_ONLY' });
@@ -75,9 +140,9 @@ describe('tokenless embedded bootstrap and identity', () => {
   });
   it.each([
     { ...context, customerId: '-1' }, { ...context, user: { email: 'no-role' } },
-    { ...context, apiPermissions: [{ method: 'GET', path: '/api/{anything}' }] },
-    { ...context, apiPermissions: [{ method: 'GET', path: '/api/v2/device?select=secret' }] },
-    { ...context, apiPermissions: [{ method: 'GET', path: '/api/v2/device' }, { method: 'GET', path: '/api/v2/device' }] },
+    { ...context, manifest: { readOnly: false, operations: [{ method: 'GET', path: '/api/{anything}' }] } },
+    { ...context, manifest: { readOnly: false, operations: [{ method: 'GET', path: '/api/v2/device?select=secret' }] } },
+    { ...context, manifest: { readOnly: false, operations: [{ method: 'GET', path: '/api/v2/device' }, { method: 'GET', path: '/api/v2/device' }] } },
   ])('rejects malformed context without fetching', async suppliedContext => {
     const client = makeClient(); const hosted = await host(client, suppliedContext);
     await expect(hosted.initialization).rejects.toThrow(); expect(fetcher).not.toHaveBeenCalled();
@@ -179,6 +244,16 @@ describe('embedded proxy transport and cancellation', () => {
     const client = makeClient({ requestTimeoutMs: 20 }); const hosted = await host(client, context, false); await hosted.initialization;
     await expect(client.api.post('/api/content', { body: {} })).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' });
     await vi.waitFor(() => expect(hosted.requests).toHaveLength(2)); expect(hosted.requests[1].type).toBe('api-cancel'); expect(client.getState().status).toBe('authenticated');
+  });
+  it('keeps the default request alive past the parent deadline and cancels at 35 seconds', async () => {
+    const client = makeClient(); const hosted = await host(client, context, false); await hosted.initialization;
+    vi.useFakeTimers(); let settled = false;
+    const request = client.api.get('/api/v2/device').finally(() => { settled = true; });
+    const rejected = expect(request).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(30_000); expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(4_999); expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1); await rejected;
+    expect(settled).toBe(true); expect(client.getState().status).toBe('authenticated');
   });
   it('rejects connection timeout and all pending requests on close', async () => {
     await expect(makeClient({ connectionTimeoutMs: 10 }).initialize()).rejects.toMatchObject({ code: 'CONNECTION_TIMEOUT' });

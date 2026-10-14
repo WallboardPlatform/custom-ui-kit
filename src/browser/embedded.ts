@@ -11,6 +11,10 @@ export interface EmbeddedApiPermission {
   readonly path: string;
   readonly description?: string;
 }
+export interface EmbeddedAppManifest {
+  readonly readOnly: boolean;
+  readonly operations: readonly EmbeddedApiPermission[];
+}
 export interface EmbeddedBootstrap { readonly parentOrigin: string; readonly nonce: string }
 export interface EmbeddedWallboardContext {
   readonly appId: number;
@@ -18,13 +22,16 @@ export interface EmbeddedWallboardContext {
   readonly customerId: number;
   readonly serverUrl: string;
   readonly readOnly: boolean;
-  readonly apiPermissions: readonly EmbeddedApiPermission[];
+  readonly manifest: EmbeddedAppManifest;
   readonly user: VerifiedUser;
 }
 export interface EmbeddedWallboardClientOptions {
+  /** The app's complete API requirements. Snapshotted before connecting; host approval is required. */
+  manifest: EmbeddedAppManifest;
   /** Exact trusted CMS origin. Normally supplied by the CMS bootstrap query parameters. */
   parentOrigin?: string;
   nonce?: string;
+  /** Time to await human permission approval, default five minutes (maximum ten minutes). */
   connectionTimeoutMs?: number;
   requestTimeoutMs?: number;
 }
@@ -68,35 +75,50 @@ function validateBootstrap(parentOrigin: string, nonce: string): EmbeddedBootstr
   }
   return Object.freeze({ parentOrigin, nonce });
 }
-function parseContext(value: unknown): EmbeddedWallboardContext {
-  if (!record(value) || !Number.isSafeInteger(value.appId) || Number(value.appId) <= 0 ||
-      typeof value.name !== 'string' || !value.name.trim() || value.name.length > 512 ||
-      typeof value.customerId !== 'number' || !Number.isSafeInteger(value.customerId) || value.customerId <= 0 ||
-      typeof value.serverUrl !== 'string' || typeof value.readOnly !== 'boolean' || !Array.isArray(value.apiPermissions) || value.apiPermissions.length > 128) {
-    throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid app context.');
+function parseManifest(value: unknown): EmbeddedAppManifest {
+  if (!record(value) || Object.keys(value).some(key => !['readOnly', 'operations'].includes(key)) ||
+      typeof value.readOnly !== 'boolean' || !Array.isArray(value.operations) || value.operations.length > 128) {
+    throw new EmbeddedHostError('INVALID_MANIFEST', 'Use an app manifest object with readOnly and operations.');
   }
-  const serverUrl = normalizeServerUrl(value.serverUrl);
-  if (serverUrl !== value.serverUrl) throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid server origin.');
   const declarations = new Set<string>();
-  const apiPermissions = value.apiPermissions.map(permission => {
-    if (!record(permission) || typeof permission.method !== 'string' || !methods.has(permission.method) ||
+  const operations = value.operations.map(permission => {
+    if (!record(permission) || Object.keys(permission).some(key => !['method', 'path', 'description'].includes(key)) ||
+        typeof permission.method !== 'string' || !methods.has(permission.method) ||
         typeof permission.path !== 'string' || (permission.description !== undefined && (typeof permission.description !== 'string' || permission.description.length > 500))) {
-      throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied invalid API permissions.');
+      throw new EmbeddedHostError('INVALID_MANIFEST', 'The app supplied invalid API operations.');
     }
     validatePath(permission.path, true);
     const key = `${permission.method} ${permission.path}`;
-    if (declarations.has(key)) throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied duplicate API permissions.');
+    if (declarations.has(key)) throw new EmbeddedHostError('INVALID_MANIFEST', 'The app supplied duplicate API operations.');
     declarations.add(key);
     return Object.freeze({ method: permission.method as EmbeddedApiMethod, path: permission.path,
       ...(permission.description === undefined ? {} : { description: permission.description }) });
   });
+  return Object.freeze({ readOnly: value.readOnly, operations: Object.freeze(operations) });
+}
+function parseContext(value: unknown, declaredManifest: EmbeddedAppManifest): EmbeddedWallboardContext {
+  if (!record(value) || !Number.isSafeInteger(value.appId) || Number(value.appId) <= 0 ||
+      typeof value.name !== 'string' || !value.name.trim() || value.name.length > 512 ||
+      typeof value.customerId !== 'number' || !Number.isSafeInteger(value.customerId) || value.customerId <= 0 ||
+      typeof value.serverUrl !== 'string' || typeof value.readOnly !== 'boolean') {
+    throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid app context.');
+  }
+  const serverUrl = normalizeServerUrl(value.serverUrl);
+  if (serverUrl !== value.serverUrl) throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid server origin.');
+  const manifest = parseManifest(value.manifest);
+  if (JSON.stringify(manifest) !== JSON.stringify(declaredManifest)) {
+    throw new EmbeddedHostError('MANIFEST_MISMATCH', 'Wallboard approved a different app manifest. Open the app again.');
+  }
+  if (manifest.readOnly && !value.readOnly) {
+    throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard cannot enable writes for a read-only app.');
+  }
   const user = Object.freeze(parseVerifiedUser(value.user));
   return Object.freeze({ appId: Number(value.appId), name: value.name, customerId: value.customerId,
-    serverUrl, readOnly: value.readOnly || user.readOnly, apiPermissions: Object.freeze(apiPermissions), user });
+    serverUrl, readOnly: value.readOnly || user.readOnly, manifest, user });
 }
-function timeout(value: number | undefined, fallback: number): number {
+function timeout(value: number | undefined, fallback: number, maximum = 120_000): number {
   const result = value ?? fallback;
-  if (!Number.isSafeInteger(result) || result <= 0 || result > 120_000) throw new TypeError('Use a positive timeout of at most two minutes.');
+  if (!Number.isSafeInteger(result) || result <= 0 || result > maximum) throw new TypeError(`Use a positive timeout of at most ${maximum} milliseconds.`);
   return result;
 }
 function allowedRead(method: string, path: string): boolean {
@@ -111,7 +133,8 @@ interface PendingRequest {
 }
 
 /** Tokenless host-managed API transport. Never opens OAuth, reads storage or fetches Wallboard directly. */
-export function createEmbeddedWallboardClient(options: EmbeddedWallboardClientOptions = {}): EmbeddedWallboardClient {
+export function createEmbeddedWallboardClient(options: EmbeddedWallboardClientOptions): EmbeddedWallboardClient {
+  const manifest = parseManifest(structuredClone(options?.manifest));
   if (!globalThis.location || !globalThis.parent || globalThis.parent === globalThis.self) {
     throw new EmbeddedHostError('NOT_EMBEDDED', 'Open this application from the Wallboard My Apps menu.');
   }
@@ -119,7 +142,7 @@ export function createEmbeddedWallboardClient(options: EmbeddedWallboardClientOp
     ? validateBootstrap(options.parentOrigin, options.nonce) : readEmbeddedBootstrap(globalThis.location.href);
   if ((options.parentOrigin !== undefined && options.parentOrigin !== bootstrap.parentOrigin) ||
       (options.nonce !== undefined && options.nonce !== bootstrap.nonce)) throw new EmbeddedHostError('INVALID_BOOTSTRAP', 'The embedded UI launch does not match its configured host.');
-  const connectionTimeoutMs = timeout(options.connectionTimeoutMs, 15_000);
+  const connectionTimeoutMs = timeout(options.connectionTimeoutMs, 300_000, 600_000);
   const requestTimeoutMs = timeout(options.requestTimeoutMs, 35_000);
   const listeners = new Set<(state: ClientState) => void>();
   const pending = new Map<string, PendingRequest>();
@@ -161,7 +184,7 @@ export function createEmbeddedWallboardClient(options: EmbeddedWallboardClientOp
     if (value.type === 'context') {
       if (context) { disconnect(new EmbeddedHostError('CONTEXT_CHANGED', 'The Wallboard app context changed. Open the app again.')); return; }
       try {
-        context = parseContext(value.context);
+        context = parseContext(value.context, manifest);
         if (context.serverUrl !== bootstrap.parentOrigin) throw new EmbeddedHostError('INVALID_MESSAGE', 'The app server does not match its configured Wallboard host.');
         apiClient = createApiTransport(send, (path, request) => requestUrl(context!.serverUrl, path, withCustomer(path, request)));
         if (connectionTimer) clearTimeout(connectionTimer);
@@ -204,8 +227,8 @@ export function createEmbeddedWallboardClient(options: EmbeddedWallboardClientOp
       port.onmessage = event => receive(event.data);
       port.onmessageerror = () => disconnect(new EmbeddedHostError('INVALID_MESSAGE', 'The Wallboard message channel could not be read.'));
       port.start();
-      connectionTimer = setTimeout(() => disconnect(new EmbeddedHostError('CONNECTION_TIMEOUT', 'Wallboard did not connect this app. Open it again from My Apps.')), connectionTimeoutMs);
-      try { globalThis.parent.postMessage({ protocol: EMBEDDED_UI_PROTOCOL, version: EMBEDDED_UI_VERSION, type: 'connect', nonce: bootstrap.nonce }, bootstrap.parentOrigin, [channel.port2]); }
+      connectionTimer = setTimeout(() => disconnect(new EmbeddedHostError('CONNECTION_TIMEOUT', 'Wallboard did not approve this app in time. Open it again from My Apps.')), connectionTimeoutMs);
+      try { globalThis.parent.postMessage({ protocol: EMBEDDED_UI_PROTOCOL, version: EMBEDDED_UI_VERSION, type: 'connect', nonce: bootstrap.nonce, manifest }, bootstrap.parentOrigin, [channel.port2]); }
       catch { channel.port2.close(); disconnect(new EmbeddedHostError('CONNECTION_FAILED', 'The Wallboard host could not receive this app connection.')); }
     });
     return connection;

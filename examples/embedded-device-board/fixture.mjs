@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 
 const port = Number(process.env.PORT ?? 8747);
 const bundle = await readFile(new URL('../../dist/examples/embedded/index.html', import.meta.url));
-const manifest = JSON.parse(await readFile(new URL('./wallboard-ui.json', import.meta.url), 'utf8'));
 const activeTokens = new Map();
 let tokenNumber = 0;
 const devices = Array.from({ length: 37 }, (_, index) => ({
@@ -14,11 +13,11 @@ const devices = Array.from({ length: 37 }, (_, index) => ({
 const identity = { email: 'synthetic@example.test', name: 'Synthetic customer owner', role: 'OWNER', customerId: 42, readOnly: true };
 const hostHtml = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Embedded UI protocol fixture</title>
 <style>body{margin:0;font:14px system-ui;background:#e5edf4;color:#23384b}header{padding:16px 22px;background:white;display:flex;align-items:center;gap:12px;flex-wrap:wrap}h1{font-size:17px;margin:0}p{margin:0}button{padding:8px 12px;border:1px solid #bed0df;border-radius:6px;background:white;cursor:pointer}#status,#consent{padding:12px 22px}#runtime{height:calc(100vh - 210px);min-height:480px}iframe{width:100%;height:100%;border:0}</style>
-<header><div><h1>Local embedded UI protocol fixture</h1><p>Synthetic identity/data only. This is not the production CMS.</p></div><button id="expire">Expire parent fixture credential</button><button id="reload">Reload iframe</button><button id="disable">Disable app</button><button id="logout">Log out fixture</button><span id="count">Proxy calls: 0</span></header>
-<div id="consent"><p><strong>Read-only app requests GET /api/v2/device</strong> — read the selected customer's device overview.</p><button id="launch">Approve this permission and open app</button></div><p id="status">No app or API proxy is running until approval.</p><div id="runtime"></div>
+<header><div><h1>Local embedded UI protocol fixture</h1><p>Synthetic identity/data only. This is not the production CMS.</p></div><button id="initialize">Open app</button><button id="expire">Expire parent fixture credential</button><button id="reload">Reload iframe</button><button id="disable">Disable app</button><button id="logout">Log out fixture</button><span id="count">Proxy calls: 0</span></header>
+<div id="consent" hidden><p><strong id="mode"></strong></p><ul id="operations"></ul><button id="approve">Approve app permissions</button><button id="deny">Decline</button></div><p id="status">Open the isolated app to receive its declaration. No identity or API access is supplied before approval.</p><div id="runtime"></div>
 <script>
-const protocol = 'wallboard.custom-ui', identity = ${JSON.stringify(identity)}, manifest = ${JSON.stringify(manifest)};
-let frame, channel, nonce, generation = 0, enabled = true, signedIn = true, loaded = false, calls = 0, credential;
+const protocol = 'wallboard.custom-ui', identity = ${JSON.stringify(identity)};
+let frame, channel, nonce, manifest, approved = false, generation = 0, enabled = true, signedIn = true, loaded = false, calls = 0, credential;
 const inflight = new Map();
 const message = value => ({ protocol, version: 2, ...value });
 const status = text => document.getElementById('status').textContent = text;
@@ -26,18 +25,30 @@ function close(reason) {
   generation++; for (const controller of inflight.values()) controller.abort(); inflight.clear();
   if (channel) { channel.close(); channel = null; }
   if (frame) { frame.remove(); frame = null; }
-  document.getElementById('consent').hidden = false; status(reason);
+  approved = false; manifest = null; document.getElementById('consent').hidden = true; status(reason);
 }
 function ready() {
-  if (loaded && channel) channel.postMessage(message({ type: 'context', context: { appId: 17, name: 'Fleet overview', customerId: 42, serverUrl: location.origin, ...manifest, user: identity } }));
+  if (approved && loaded && channel) channel.postMessage(message({ type: 'context', context: { appId: 17, name: 'Fleet overview', customerId: 42, serverUrl: location.origin, readOnly: identity.readOnly || manifest.readOnly, manifest, user: identity } }));
+}
+function readManifest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['readOnly', 'operations'].includes(key)) || typeof value.readOnly !== 'boolean' || !Array.isArray(value.operations) || value.operations.length > 128) throw new Error('Invalid app manifest.');
+  const seen = new Set();
+  const operations = value.operations.map(operation => {
+    if (!operation || typeof operation !== 'object' || Array.isArray(operation) || Object.keys(operation).some(key => !['method', 'path', 'description'].includes(key)) || !['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(operation.method) || typeof operation.path !== 'string' || operation.path.length > 2048 || !operation.path.startsWith('/api/') || (operation.description !== undefined && (typeof operation.description !== 'string' || operation.description.length > 500))) throw new Error('Invalid app operation.');
+    const segments = operation.path.split('/').slice(2);
+    const literal = /^[A-Za-z0-9_-]+$/, placeholder = /^\\{[A-Za-z][A-Za-z0-9_]*\\}$/;
+    if (!segments.length || !literal.test(segments[0]) || segments.some(segment => !literal.test(segment) && !placeholder.test(segment))) throw new Error('Invalid app path.');
+    const key = operation.method + ' ' + operation.path; if (seen.has(key)) throw new Error('Duplicate app operation.'); seen.add(key);
+    return Object.freeze({ method: operation.method, path: operation.path, ...(operation.description === undefined ? {} : { description: operation.description }) });
+  });
+  return Object.freeze({ readOnly: value.readOnly, operations: Object.freeze(operations) });
 }
 async function getCredential() {
   if (!credential || credential.expiresAt <= Date.now()) credential = await (await fetch('/fixture/token', { method: 'POST' })).json();
   return credential.accessToken;
 }
 function launch() {
-  close('Connecting a fresh approved app instance…'); enabled = true; signedIn = true; loaded = false;
-  document.getElementById('consent').hidden = true;
+  close('Initializing isolated app with zero API access…'); enabled = true; signedIn = true; loaded = false;
   nonce = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('');
   const url = new URL('/app/index.html', location.origin);
   url.search = new URLSearchParams({ wbEmbedVersion: '2', wbParentOrigin: location.origin, wbEmbedNonce: nonce }).toString();
@@ -47,7 +58,9 @@ function launch() {
 }
 window.addEventListener('message', event => {
   const data = event.data;
-  if (!frame || event.source !== frame.contentWindow || event.origin !== 'null' || !data || typeof data !== 'object' || Object.keys(data).length !== 4 || data.protocol !== protocol || data.version !== 2 || data.type !== 'connect' || data.nonce !== nonce || event.ports.length !== 1 || channel) { for (const port of event.ports) port.close(); return; }
+  if (!frame || event.source !== frame.contentWindow || event.origin !== 'null' || !data || typeof data !== 'object' || Object.keys(data).length !== 5 || data.protocol !== protocol || data.version !== 2 || data.type !== 'connect' || data.nonce !== nonce || event.ports.length !== 1) { for (const port of event.ports) port.close(); return; }
+  if (channel) { for (const port of event.ports) port.close(); close('App attempted to reconnect. Open a fresh app instance.'); return; }
+  try { manifest = readManifest(data.manifest); } catch (error) { for (const port of event.ports) port.close(); close(error.message); return; }
   channel = event.ports[0]; const connectedPort = channel; const currentGeneration = generation;
   const reply = value => { if (currentGeneration === generation && channel === connectedPort) connectedPort.postMessage(message(value)); };
   channel.onmessage = async event => {
@@ -55,8 +68,9 @@ window.addEventListener('message', event => {
     if (!request || request.protocol !== protocol || request.version !== 2 || typeof request.requestId !== 'string' || request.requestId.length > 80) return;
     if (request.type === 'api-cancel') { inflight.get(request.requestId)?.abort(); return; }
     if (request.type !== 'api-request') return;
+    if (!approved) { reply({ type: 'error', requestId: request.requestId, code: 'CONSENT_REQUIRED', message: 'Approve this app before requesting Wallboard data.', status: 403 }); return; }
     if (!enabled || !signedIn || currentGeneration !== generation) { close('The fixture app is no longer available.'); return; }
-    if (request.method !== 'GET' || request.path !== '/api/v2/device' || request.body !== undefined || request.headers !== undefined) {
+    if (request.method !== 'GET' || request.path !== '/api/v2/device' || !manifest.operations.some(operation => operation.method === request.method && operation.path === request.path) || request.body !== undefined || request.headers !== undefined) {
       reply({ type: 'error', requestId: request.requestId, code: 'PERMISSION_DENIED', message: 'Only the approved device-read operation is allowed.', status: 403 }); return;
     }
     const controller = new AbortController(); inflight.set(request.requestId, controller);
@@ -74,9 +88,15 @@ window.addEventListener('message', event => {
     } catch (error) { if (!controller.signal.aborted) reply({ type: 'error', requestId: request.requestId, code: 'REQUEST_FAILED', message: error.message }); }
     finally { inflight.delete(request.requestId); }
   };
-  channel.start(); ready();
+  channel.start();
+  document.getElementById('mode').textContent = 'Read-only synthetic account; app declares ' + (manifest.readOnly ? 'read-only' : 'write-capable') + ' mode.';
+  const list = document.getElementById('operations'); list.replaceChildren();
+  for (const operation of manifest.operations) { const item = document.createElement('li'); item.textContent = operation.method + ' ' + operation.path + (operation.description ? ' — ' + operation.description : ''); list.append(item); }
+  document.getElementById('consent').hidden = false; status('Declaration received. Identity and API proxy remain unavailable until approval.');
 });
-document.getElementById('launch').onclick = launch;
+document.getElementById('initialize').onclick = launch;
+document.getElementById('approve').onclick = () => { if (!manifest || !channel || !enabled || !signedIn) return; approved = true; document.getElementById('consent').hidden = true; ready(); };
+document.getElementById('deny').onclick = () => { channel?.postMessage(message({ type: 'error', code: 'CONSENT_DENIED', message: 'The user declined this app.' })); close('App declined. No identity or API access supplied.'); };
 document.getElementById('expire').onclick = async () => { await fetch('/fixture/expire', { method: 'POST' }); status('Parent fixture credential expired. Refresh screens to exercise parent renewal after a 401.'); };
 document.getElementById('reload').onclick = () => { if (frame) frame.src = frame.src; };
 document.getElementById('disable').onclick = () => { enabled = false; close('Fixture app disabled. Proxy closed; pending calls cancelled.'); };
