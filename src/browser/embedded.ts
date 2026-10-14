@@ -130,6 +130,8 @@ interface PendingRequest {
   reject: (error: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
   cleanup: () => void;
+  cancel: (error: unknown) => void;
+  phase: 'initial' | 'confirmation' | 'executing';
 }
 
 /** Tokenless host-managed API transport. Never opens OAuth, reads storage or fetches Wallboard directly. */
@@ -166,6 +168,12 @@ export function createEmbeddedWallboardClient(options: EmbeddedWallboardClientOp
     if (request) { pending.delete(requestId); clearTimeout(request.timer); request.cleanup(); }
     return request;
   }
+  function setRequestDeadline(requestId: string, milliseconds: number, error: EmbeddedHostError): void {
+    const request = pending.get(requestId);
+    if (!request) return;
+    clearTimeout(request.timer);
+    request.timer = setTimeout(() => request.cancel(error), milliseconds);
+  }
   function disconnect(error: Error, status: ClientState['status'] = 'error'): void {
     disposed = true;
     if (connectionTimer) clearTimeout(connectionTimer);
@@ -191,7 +199,25 @@ export function createEmbeddedWallboardClient(options: EmbeddedWallboardClientOp
         connectionTimer = null;
         emit('authenticated'); resolveConnection?.(); resolveConnection = null; rejectConnection = null;
       } catch (cause) { disconnect(cause instanceof Error ? cause : new EmbeddedHostError('INVALID_MESSAGE', 'The app context could not be read.')); }
+    } else if (value.type === 'api-awaiting-confirmation' || value.type === 'api-executing') {
+      if (typeof value.requestId !== 'string') return;
+      const request = pending.get(value.requestId);
+      if (!request) return;
+      if (Object.keys(value).length !== 4 || Object.keys(value).some(key => !['protocol', 'version', 'type', 'requestId'].includes(key))) {
+        disconnect(new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied invalid request progress.')); return;
+      }
+      // A request can wait for confirmation once. Duplicate/late phases cannot prolong its deadlines.
+      if (value.type === 'api-awaiting-confirmation' && request.phase === 'initial') {
+        request.phase = 'confirmation';
+        setRequestDeadline(value.requestId, 305_000, new EmbeddedHostError('CONFIRMATION_TIMEOUT', 'Wallboard did not confirm this request in time.', 403));
+      } else if (value.type === 'api-executing' && request.phase === 'confirmation') {
+        request.phase = 'executing';
+        setRequestDeadline(value.requestId, requestTimeoutMs, new EmbeddedHostError('REQUEST_TIMEOUT', 'Wallboard did not complete this API request.'));
+      }
     } else if (value.type === 'api-response' && typeof value.requestId === 'string' && pending.has(value.requestId)) {
+      if (pending.get(value.requestId)?.phase === 'confirmation') {
+        disconnect(new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an API result before request confirmation.')); return;
+      }
       if (!Number.isSafeInteger(value.status) || Number(value.status) < 200 || Number(value.status) > 599 ||
           (value.contentType !== undefined && (typeof value.contentType !== 'string' || /[\r\n]/.test(value.contentType)))) {
         disconnect(new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid API response.')); return;
@@ -264,7 +290,7 @@ export function createEmbeddedWallboardClient(options: EmbeddedWallboardClientOp
         active.reject(error);
       };
       const abort = () => cancel(request.signal?.reason ?? new DOMException('Aborted', 'AbortError'));
-      pending.set(requestId, { resolve, reject,
+      pending.set(requestId, { resolve, reject, cancel, phase: 'initial',
         timer: setTimeout(() => cancel(new EmbeddedHostError('REQUEST_TIMEOUT', 'Wallboard did not complete this API request.')), requestTimeoutMs),
         cleanup: () => request.signal?.removeEventListener('abort', abort) });
       request.signal?.addEventListener('abort', abort, { once: true });

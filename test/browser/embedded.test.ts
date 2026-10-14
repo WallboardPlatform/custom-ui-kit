@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { setTimeout as nativeDelay } from 'node:timers/promises';
 import { createEmbeddedWallboardClient, EMBEDDED_UI_PROTOCOL, EMBEDDED_UI_VERSION, EmbeddedHostError, readEmbeddedBootstrap, type EmbeddedAppManifest, type EmbeddedWallboardClient } from '../../src/browser/embedded.js';
 
 const parentOrigin = 'https://wallboard.example.test';
@@ -245,10 +246,10 @@ describe('embedded proxy transport and cancellation', () => {
     await expect(client.api.post('/api/content', { body: {} })).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' });
     await vi.waitFor(() => expect(hosted.requests).toHaveLength(2)); expect(hosted.requests[1].type).toBe('api-cancel'); expect(client.getState().status).toBe('authenticated');
   });
-  it('keeps the default request alive past the parent deadline and cancels at 35 seconds', async () => {
+  it.each(['GET', 'PUT'] as const)('keeps an ordinary %s request alive past the parent deadline and cancels at 35 seconds', async method => {
     const client = makeClient(); const hosted = await host(client, context, false); await hosted.initialization;
     vi.useFakeTimers(); let settled = false;
-    const request = client.api.get('/api/v2/device').finally(() => { settled = true; });
+    const request = client.api.raw('/api/content/item-1', method, method === 'PUT' ? { body: { name: 'Synthetic change' } } : {}).finally(() => { settled = true; });
     const rejected = expect(request).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' });
     await vi.advanceTimersByTimeAsync(30_000); expect(settled).toBe(false);
     await vi.advanceTimersByTimeAsync(4_999); expect(settled).toBe(false);
@@ -272,5 +273,110 @@ describe('embedded proxy transport and cancellation', () => {
   it('does not log the CMS out when this app signs out', async () => {
     const client = makeClient(); await (await host(client)).initialization; client.signOut();
     expect(client.getState().status).toBe('anonymous'); expect(fetcher).not.toHaveBeenCalled();
+  });
+});
+
+describe('request-scoped destructive confirmation', () => {
+  async function begin(method: 'DELETE' | 'GET' | 'POST' = 'DELETE', requestTimeoutMs?: number) {
+    const client = makeClient({ requestTimeoutMs }); const hosted = await host(client, context, false); await hosted.initialization;
+    vi.useFakeTimers(); let settled = false;
+    const request = client.api.raw('/api/content/item-1', method).finally(() => { settled = true; });
+    // Attach a handler before advancing fake time; real MessageChannel delivery still uses the native event loop.
+    void request.catch(() => undefined);
+    await nativeDelay(5); expect(hosted.requests).toHaveLength(1);
+    return { client, hosted, request, requestId: hosted.requests[0].requestId as string, settled: () => settled };
+  }
+  async function progress(port: MessagePort, requestId: string, type: 'api-awaiting-confirmation' | 'api-executing', extra: object = {}) {
+    port.postMessage(envelope({ type, requestId, ...extra })); await nativeDelay(5);
+  }
+  it('waits beyond the API timeout, but cancels an unanswered human confirmation after 305 seconds', async () => {
+    const active = await begin(); await progress(active.hosted.port, active.requestId, 'api-awaiting-confirmation');
+    await vi.advanceTimersByTimeAsync(35_000); expect(active.settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(269_999); expect(active.settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(active.request).rejects.toMatchObject({ code: 'CONFIRMATION_TIMEOUT', status: 403 });
+    await nativeDelay(5);
+    expect(active.hosted.requests[1]).toEqual(envelope({ type: 'api-cancel', requestId: active.requestId }));
+    expect(active.client.getState().status).toBe('authenticated');
+  });
+  it.each([undefined, 1_000])('restarts the original API timeout after confirmation (override %s)', async override => {
+    const active = await begin('DELETE', override); await progress(active.hosted.port, active.requestId, 'api-awaiting-confirmation');
+    await vi.advanceTimersByTimeAsync(40_000); expect(active.settled()).toBe(false);
+    await progress(active.hosted.port, active.requestId, 'api-executing');
+    await vi.advanceTimersByTimeAsync((override ?? 35_000) - 1); expect(active.settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(active.request).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' });
+    expect(active.client.getState().status).toBe('authenticated');
+  });
+  it('does not extend a human deadline on duplicate awaiting-confirmation messages', async () => {
+    const active = await begin(); await progress(active.hosted.port, active.requestId, 'api-awaiting-confirmation');
+    await vi.advanceTimersByTimeAsync(300_000); await progress(active.hosted.port, active.requestId, 'api-awaiting-confirmation');
+    await vi.advanceTimersByTimeAsync(4_999); expect(active.settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1); await expect(active.request).rejects.toMatchObject({ code: 'CONFIRMATION_TIMEOUT' });
+  });
+  it('does not extend an ordinary deadline on an out-of-order executing message', async () => {
+    const active = await begin('GET'); await vi.advanceTimersByTimeAsync(30_000);
+    await progress(active.hosted.port, active.requestId, 'api-executing');
+    await vi.advanceTimersByTimeAsync(4_999); expect(active.settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1); await expect(active.request).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' });
+  });
+  it('allows only one confirmation phase and never extends executing on duplicate statuses', async () => {
+    const active = await begin(); await progress(active.hosted.port, active.requestId, 'api-awaiting-confirmation');
+    await vi.advanceTimersByTimeAsync(40_000); await progress(active.hosted.port, active.requestId, 'api-executing');
+    await vi.advanceTimersByTimeAsync(34_000);
+    await progress(active.hosted.port, active.requestId, 'api-awaiting-confirmation');
+    await progress(active.hosted.port, active.requestId, 'api-executing');
+    await vi.advanceTimersByTimeAsync(999); expect(active.settled()).toBe(false);
+    await vi.advanceTimersByTimeAsync(1); await expect(active.request).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' });
+  });
+  it.each(['GET', 'POST'] as const)('supports host confirmation for a legacy destructive %s without duplicating the endpoint registry', async method => {
+    const active = await begin(method); await progress(active.hosted.port, active.requestId, 'api-awaiting-confirmation');
+    await vi.advanceTimersByTimeAsync(40_000); expect(active.settled()).toBe(false);
+    await progress(active.hosted.port, active.requestId, 'api-executing');
+    active.hosted.port.postMessage(envelope({ type: 'api-response', requestId: active.requestId, status: 204 }));
+    expect((await active.request).status).toBe(204); expect(active.client.getState().status).toBe('authenticated');
+  });
+  it('rejects a declined deletion without affecting a parallel ordinary request or session', async () => {
+    const active = await begin(); const other = active.client.api.get('/api/v2/device'); await nativeDelay(5);
+    const otherId = active.hosted.requests[1].requestId;
+    await progress(active.hosted.port, active.requestId, 'api-awaiting-confirmation');
+    active.hosted.port.postMessage(envelope({ type: 'error', requestId: active.requestId, code: 'CONFIRMATION_DENIED', message: 'The user declined this deletion.', status: 403 }));
+    active.hosted.port.postMessage(envelope({ type: 'api-response', requestId: otherId, status: 200, body: { content: [] } }));
+    await expect(active.request).rejects.toMatchObject({ code: 'CONFIRMATION_DENIED', status: 403 });
+    expect(await other).toEqual({ content: [] }); expect(active.client.getState().status).toBe('authenticated');
+  });
+  it.each(['abort', 'dispose'] as const)('cancels a pending confirmation on %s and ignores late execution/replies', async action => {
+    const client = makeClient(); const hosted = await host(client, context, false); await hosted.initialization;
+    vi.useFakeTimers(); const controller = new AbortController();
+    const request = client.api.delete('/api/content/item-1', { signal: controller.signal }); void request.catch(() => undefined);
+    await nativeDelay(5); const requestId = hosted.requests[0].requestId as string;
+    await progress(hosted.port, requestId, 'api-awaiting-confirmation'); await vi.advanceTimersByTimeAsync(40_000);
+    if (action === 'abort') controller.abort(); else client.dispose();
+    if (action === 'abort') await expect(request).rejects.toMatchObject({ name: 'AbortError' }); else await expect(request).rejects.toThrow('closed');
+    await nativeDelay(5);
+    expect(hosted.requests[1]).toEqual(envelope({ type: 'api-cancel', requestId }));
+    await progress(hosted.port, requestId, 'api-executing');
+    hosted.port.postMessage(envelope({ type: 'api-response', requestId, status: 200, body: { late: true } })); await nativeDelay(5);
+    expect(client.getState().status).toBe(action === 'abort' ? 'authenticated' : 'anonymous'); expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each(['api-awaiting-confirmation', 'api-executing'] as const)('fails closed on malformed %s for a pending request', async type => {
+    const active = await begin(); await progress(active.hosted.port, active.requestId, type, { body: { credential: 'must-not-be-sent' } });
+    await expect(active.request).rejects.toMatchObject({ code: 'INVALID_MESSAGE' });
+    expect(active.client.getState().status).toBe('error'); expect(active.client.getContext()).toBeNull();
+  });
+  it('ignores unknown and completed request progress without affecting a live operation', async () => {
+    const active = await begin('GET');
+    await progress(active.hosted.port, 'unknown-request', 'api-awaiting-confirmation', { extra: 'ignored unknown ID' });
+    await progress(active.hosted.port, 'unknown-request', 'api-executing');
+    active.hosted.port.postMessage(envelope({ type: 'api-response', requestId: active.requestId, status: 200, body: { okay: true } }));
+    expect(await (await active.request).json()).toEqual({ okay: true });
+    await progress(active.hosted.port, active.requestId, 'api-awaiting-confirmation');
+    await progress(active.hosted.port, active.requestId, 'api-executing');
+    expect(active.client.getState().status).toBe('authenticated'); expect(vi.getTimerCount()).toBe(0);
+  });
+  it('fails closed if an API result arrives before confirmation is marked executing', async () => {
+    const active = await begin(); await progress(active.hosted.port, active.requestId, 'api-awaiting-confirmation');
+    active.hosted.port.postMessage(envelope({ type: 'api-response', requestId: active.requestId, status: 204 }));
+    await expect(active.request).rejects.toMatchObject({ code: 'INVALID_MESSAGE' }); expect(active.client.getContext()).toBeNull();
   });
 });
