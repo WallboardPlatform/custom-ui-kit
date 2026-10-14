@@ -1,46 +1,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { setImmediate as nextMessageTurn } from 'node:timers/promises';
-import { createEmbeddedWallboardClient, EMBEDDED_UI_PROTOCOL, EmbeddedHostError, readEmbeddedBootstrap, type EmbeddedWallboardClient } from '../../src/browser/embedded.js';
+import { createEmbeddedWallboardClient, EMBEDDED_UI_PROTOCOL, EMBEDDED_UI_VERSION, EmbeddedHostError, readEmbeddedBootstrap, type EmbeddedWallboardClient } from '../../src/browser/embedded.js';
 
 const parentOrigin = 'https://wallboard.example.test';
 const nonce = 'a'.repeat(64);
-const context = { appId: 17, name: 'Fleet overview', customerId: 42, serverUrl: parentOrigin };
-const profile = { email: 'person@example.test', name: 'Verified user', role: 'ADMIN', customerId: 34, readOnly: false };
-const jwt = (readOnly = false, label = 'original') => `header.${btoa(JSON.stringify({ sub: 'person@example.test', scope: 'VIEWER', customerId: 99, readOnly, label })).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')}.signature`;
-const envelope = (message: object) => ({ protocol: EMBEDDED_UI_PROTOCOL, version: 1, ...message });
+const profile = { email: 'person@example.test', name: 'Verified user', role: 'OWNER', customerId: 42, readOnly: false };
+const context = { appId: 17, name: 'Fleet overview', customerId: 42, serverUrl: parentOrigin, readOnly: false,
+  apiPermissions: [{ method: 'GET', path: '/api/v2/device', description: 'Read devices' }], user: profile };
+const envelope = (message: object) => ({ protocol: EMBEDDED_UI_PROTOCOL, version: EMBEDDED_UI_VERSION, ...message });
 const clients: EmbeddedWallboardClient[] = [];
 const hostPorts: MessagePort[] = [];
 let connectMessage: { data: Record<string, unknown>; origin: string; ports: Transferable[] } | null;
+let fetcher: ReturnType<typeof vi.fn<typeof fetch>>;
 
 beforeEach(() => {
   connectMessage = null;
   vi.stubGlobal('self', globalThis);
   vi.stubGlobal('parent', { postMessage(data: Record<string, unknown>, origin: string, ports: Transferable[]) {
-    connectMessage = { data, origin, ports };
-    hostPorts.push(ports[0] as MessagePort);
+    connectMessage = { data, origin, ports }; hostPorts.push(ports[0] as MessagePort);
   } });
-  vi.stubGlobal('location', new URL(`https://custom.example.test/index.html?wbEmbedVersion=1&wbParentOrigin=${encodeURIComponent(parentOrigin)}&wbEmbedNonce=${nonce}`));
-  const deniedStorage = new Proxy({}, { get() { throw new DOMException('Storage is blocked in an opaque frame', 'SecurityError'); } });
-  vi.stubGlobal('sessionStorage', deniedStorage);
-  vi.stubGlobal('localStorage', deniedStorage);
+  vi.stubGlobal('location', new URL(`https://custom.example.test/index.html?wbEmbedVersion=2&wbParentOrigin=${encodeURIComponent(parentOrigin)}&wbEmbedNonce=${nonce}`));
+  const deniedStorage = new Proxy({}, { get() { throw new DOMException('Storage is blocked', 'SecurityError'); } });
+  vi.stubGlobal('sessionStorage', deniedStorage); vi.stubGlobal('localStorage', deniedStorage);
+  fetcher = vi.fn<typeof fetch>(async () => { throw new Error('Embedded SDK must never fetch'); });
+  vi.stubGlobal('fetch', fetcher);
 });
 afterEach(() => {
   for (const client of clients.splice(0)) client.dispose();
   for (const port of hostPorts.splice(0)) port.close();
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
+  vi.useRealTimers(); vi.unstubAllGlobals();
 });
-
 function makeClient(options: Parameters<typeof createEmbeddedWallboardClient>[0] = {}) {
-  const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(profile), { headers: { 'Content-Type': 'application/json' } }));
-  const client = createEmbeddedWallboardClient({ fetch: fetcher, ...options });
-  clients.push(client);
-  return { client, fetcher };
+  const client = createEmbeddedWallboardClient(options); clients.push(client); return client;
 }
-
-async function host(client: EmbeddedWallboardClient, autoToken = true) {
+async function host(client: EmbeddedWallboardClient, suppliedContext: object = context, respond = true) {
   const initialization = client.initialize();
   expect(connectMessage?.origin).toBe(parentOrigin);
   expect(connectMessage?.data).toEqual(envelope({ type: 'connect', nonce }));
@@ -49,244 +41,161 @@ async function host(client: EmbeddedWallboardClient, autoToken = true) {
   const requests: Record<string, unknown>[] = [];
   port.onmessage = event => {
     requests.push(event.data);
-    if (autoToken) port.postMessage(envelope({ type: 'access-token', requestId: event.data.requestId, accessToken: jwt(), expiresAt: Date.now() + 1_800_000 }));
+    if (respond && event.data.type === 'api-request') port.postMessage(envelope({ type: 'api-response', requestId: event.data.requestId, status: 200, body: { content: [] }, contentType: 'application/json' }));
   };
-  port.start();
-  port.postMessage(envelope({ type: 'ready', context }));
+  port.start(); port.postMessage(envelope({ type: 'context', context: suppliedContext }));
   return { port, requests, initialization };
 }
 
-describe('embedded bootstrap and identity', () => {
-  it('transfers one child-created port to the exact parent and authenticates without storage or OAuth', async () => {
-    const { client, fetcher } = makeClient();
-    const hosted = await host(client);
-    const state = await hosted.initialization;
-    expect(state.status).toBe('authenticated');
-    expect(state.user?.role).toBe('ADMIN');
-    expect(state.displayIdentity?.role).toBe('VIEWER');
-    expect(state.customerId).toBe(42);
-    expect(state).not.toHaveProperty('accessToken');
-    expect(state).not.toHaveProperty('refreshToken');
-    expect(client.getContext()).toEqual(context);
-    expect(Object.isFrozen(client.getContext())).toBe(true);
-    expect(hosted.requests).toHaveLength(1);
-    expect(fetcher.mock.calls[0][0]).toBe(`${parentOrigin}/api/v2/user/me`);
-    const request = fetcher.mock.calls[0][1]!;
-    expect(request.credentials).toBe('omit');
-    expect(request.redirect).toBe('error');
-    expect(new Headers(request.headers).get('Authorization')).toBe(`Bearer ${jwt()}`);
+describe('tokenless embedded bootstrap and identity', () => {
+  it('uses trusted host identity without API fetch, tokens, OAuth or storage', async () => {
+    const client = makeClient(); const hosted = await host(client); const state = await hosted.initialization;
+    expect(state.status).toBe('authenticated'); expect(state.user).toEqual(profile);
+    expect(state.displayIdentity).toBeNull(); expect(state.customerId).toBe(42);
+    expect(state).not.toHaveProperty('accessToken'); expect(state).not.toHaveProperty('refreshToken');
+    expect(client.getContext()).toEqual(context); expect(Object.isFrozen(client.getContext())).toBe(true);
+    expect(Object.isFrozen(client.getContext()?.apiPermissions)).toBe(true);
+    expect(hosted.requests).toHaveLength(0); expect(fetcher).not.toHaveBeenCalled();
     await expect(client.signIn()).rejects.toMatchObject({ code: 'HOST_MANAGED_AUTH' });
+    await expect(client.getToken()).rejects.toMatchObject({ code: 'API_PROXY_ONLY' });
+    await expect(client.getToken(true)).rejects.toMatchObject({ code: 'API_PROXY_ONLY' });
+    expect(hosted.requests).toHaveLength(0);
   });
-
   it.each([
-    'wbEmbedVersion=2',
-    `wbEmbedVersion=1&wbParentOrigin=${parentOrigin}&wbEmbedNonce=short`,
-    `wbEmbedVersion=1&wbParentOrigin=${parentOrigin}&wbEmbedNonce=${nonce}&wbEmbedNonce=${nonce}`,
-    `wbEmbedVersion=1&wbParentOrigin=https://user:password@wallboard.example.test&wbEmbedNonce=${nonce}`,
-  ])('rejects incompatible or ambiguous bootstrap before communicating: %s', parameters => {
-    expect(() => readEmbeddedBootstrap(`https://custom.example.test/?${parameters}`)).toThrow();
-    expect(connectMessage).toBeNull();
+    'wbEmbedVersion=1',
+    `wbEmbedVersion=2&wbParentOrigin=${parentOrigin}&wbEmbedNonce=short`,
+    `wbEmbedVersion=2&wbParentOrigin=${parentOrigin}&wbEmbedNonce=${nonce}&wbEmbedNonce=${nonce}`,
+    `wbEmbedVersion=2&wbParentOrigin=https://user:password@wallboard.example.test&wbEmbedNonce=${nonce}`,
+  ])('rejects incompatible/ambiguous bootstrap: %s', parameters => {
+    expect(() => readEmbeddedBootstrap(`https://custom.example.test/?${parameters}`)).toThrow(); expect(connectMessage).toBeNull();
   });
-
-  it('rejects top-level use and mismatched explicit host configuration', () => {
+  it('rejects top-level use and mismatched host configuration', () => {
     expect(() => makeClient({ parentOrigin: 'https://different.example.test' })).toThrow();
-    vi.stubGlobal('parent', globalThis);
-    expect(() => makeClient()).toThrow(EmbeddedHostError);
+    vi.stubGlobal('parent', globalThis); expect(() => makeClient()).toThrow(EmbeddedHostError);
   });
-
-  it('rejects a malformed ready context before handing a token to fetch', async () => {
-    const { client, fetcher } = makeClient();
-    const initialization = client.initialize();
-    const rejected = expect(initialization).rejects.toThrow('invalid app context');
-    (connectMessage!.ports[0] as MessagePort).postMessage(envelope({ type: 'ready', context: { ...context, customerId: '-1' } }));
-    await rejected;
-    expect(fetcher).not.toHaveBeenCalled();
+  it.each([
+    { ...context, customerId: '-1' }, { ...context, user: { email: 'no-role' } },
+    { ...context, apiPermissions: [{ method: 'GET', path: '/api/{anything}' }] },
+    { ...context, apiPermissions: [{ method: 'GET', path: '/api/v2/device?select=secret' }] },
+    { ...context, apiPermissions: [{ method: 'GET', path: '/api/v2/device' }, { method: 'GET', path: '/api/v2/device' }] },
+  ])('rejects malformed context without fetching', async suppliedContext => {
+    const client = makeClient(); const hosted = await host(client, suppliedContext);
+    await expect(hosted.initialization).rejects.toThrow(); expect(fetcher).not.toHaveBeenCalled();
   });
-
-  it('defaults API queries to the host customer while preserving explicit authorized instance calls', async () => {
-    const { client, fetcher } = makeClient();
-    await (await host(client)).initialization;
-    await client.api.get('/api/v2/device', { query: { page: 0 } });
-    await client.api.get('/api/customUi/available', { instance: true });
-    expect(new URL(String(fetcher.mock.calls[1][0])).searchParams.get('customerId')).toBe('42');
-    expect(new URL(String(fetcher.mock.calls[2][0])).searchParams.has('customerId')).toBe(false);
+  it('requires version2 context and ignores unsolicited tokens without retaining them', async () => {
+    const client = makeClient(); const initialization = client.initialize(); const port = connectMessage!.ports[0] as MessagePort;
+    port.postMessage({ protocol: EMBEDDED_UI_PROTOCOL, version: 1, type: 'ready', context });
+    port.postMessage(envelope({ type: 'access-token', accessToken: 'malicious.jwt.token', expiresAt: Date.now() + 10000 }));
+    port.postMessage(envelope({ type: 'context', context }));
+    expect((await initialization).status).toBe('authenticated'); expect(fetcher).not.toHaveBeenCalled();
+    expect(JSON.stringify(client.getContext())).not.toContain('malicious.jwt.token');
+    await expect(client.getToken()).rejects.toMatchObject({ code: 'API_PROXY_ONLY' });
   });
-
-  it('combines the verified account and restrictive current-token read-only flags', async () => {
-    const { client } = makeClient();
-    const hosted = await host(client, false);
-    await vi.waitFor(() => expect(hosted.requests).toHaveLength(1));
-    hosted.port.postMessage(envelope({ type: 'access-token', requestId: hosted.requests[0].requestId, accessToken: jwt(true), expiresAt: Date.now() + 1_800_000 }));
-    expect((await hosted.initialization).readOnly).toBe(true);
+  it('combines host mode and account read-only flags, preserving original identity', async () => {
+    const client = makeClient(); const hosted = await host(client, { ...context, customerId: 43, user: { ...profile, readOnly: true } });
+    const state = await hosted.initialization; expect(state.readOnly).toBe(true); expect(state.customerId).toBe(43); expect(state.user?.customerId).toBe(42);
+    await expect(client.api.put('/api/v2/device/device-a', { body: {} })).rejects.toMatchObject({ code: 'READ_ONLY' });
+    expect(hosted.requests).toHaveLength(0);
   });
 });
 
-describe('embedded token renewal and cancellation', () => {
+describe('embedded proxy transport and cancellation', () => {
+  it('keeps API response semantics and sends method/path/params only over the port', async () => {
+    const client = makeClient(); const hosted = await host(client); await hosted.initialization;
+    await expect(client.api.get('/api/v2/device', { query: { page: 0, select: ['id', 'name'] } })).resolves.toEqual({ content: [] });
+    await client.api.get('/api/customUi/available', { instance: true });
+    expect(hosted.requests[0]).toEqual(envelope({ type: 'api-request', requestId: expect.any(String), method: 'GET', path: '/api/v2/device', params: { page: '0', select: ['id', 'name'], customerId: '42' } }));
+    expect(hosted.requests[1]).not.toHaveProperty('params'); expect(fetcher).not.toHaveBeenCalled();
+    await client.api.forCustomer(43).get('/api/v2/device'); expect(hosted.requests[2].params).toEqual({ customerId: '43' });
+  });
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE'] as const)('preserves %s body and reconstructed raw Response', async method => {
+    const client = makeClient(); const hosted = await host(client); await hosted.initialization;
+    const response = await client.api.raw('/api/content/item-1', method, { body: { name: 'test' } });
+    expect(response.status).toBe(200); expect(response.headers.get('Content-Type')).toBe('application/json');
+    expect(await response.json()).toEqual({ content: [] }); expect(hosted.requests[0].body).toEqual({ name: 'test' });
+  });
+  it('isolates parallel responses and request-specific errors without closing the client', async () => {
+    const client = makeClient(); const hosted = await host(client, context, false); await hosted.initialization;
+    const first = client.api.get('/api/content/item-a'); const second = client.api.get('/api/content/item-b'); const third = client.api.get('/api/content/item-c');
+    const failed = expect(third).rejects.toMatchObject({ code: 'PERMISSION_DENIED', status: 403 });
+    await vi.waitFor(() => expect(hosted.requests).toHaveLength(3));
+    const ids = hosted.requests.map(request => request.requestId);
+    hosted.port.postMessage(envelope({ type: 'api-response', requestId: ids[1], status: 200, body: { id: 'item-b' } }));
+    hosted.port.postMessage(envelope({ type: 'error', requestId: ids[2], code: 'PERMISSION_DENIED', message: 'Endpoint not approved', status: 403 }));
+    hosted.port.postMessage(envelope({ type: 'api-response', requestId: ids[0], status: 200, body: { id: 'item-a' } }));
+    expect(await first).toEqual({ id: 'item-a' }); expect(await second).toEqual({ id: 'item-b' }); await failed;
+    expect(client.getState().status).toBe('authenticated');
+  });
+  it('preserves backend API status/body errors without retrying uncertain writes', async () => {
+    const client = makeClient(); const hosted = await host(client, context, false); await hosted.initialization;
+    const request = client.api.post('/api/content', { body: {} }); const rejected = expect(request).rejects.toMatchObject({ status: 403, body: { message: 'Not allowed' } });
+    await vi.waitFor(() => expect(hosted.requests).toHaveLength(1));
+    hosted.port.postMessage(envelope({ type: 'api-response', requestId: hosted.requests[0].requestId, status: 403, body: { message: 'Not allowed' } }));
+    await rejected; expect(hosted.requests).toHaveLength(1);
+  });
   it.each([
-    { requestTimeoutMs: undefined, expected: 'authenticated' },
-    { requestTimeoutMs: 15_000, expected: 'TOKEN_TIMEOUT' },
-  ])('handles a host response within its 30-second budget with request timeout $requestTimeoutMs', async ({ requestTimeoutMs, expected }) => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    const { client, fetcher } = makeClient({ requestTimeoutMs });
-    const hosted = await host(client, false);
-    const completion = hosted.initialization.then(state => state.status, (error: unknown) => {
-      if (!(error instanceof EmbeddedHostError)) throw error;
-      return error.code;
-    });
-    hosted.port.onmessage = event => {
-      hosted.requests.push(event.data);
-      setTimeout(() => hosted.port.postMessage(envelope({
-        type: 'access-token', requestId: event.data.requestId, accessToken: jwt(), expiresAt: Date.now() + 1_800_000,
-      })), 20_000);
-    };
-    for (let turn = 0; hosted.requests.length === 0 && turn < 20; turn++) await nextMessageTurn();
-    expect(hosted.requests).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(20_000);
-    for (let turn = 0; client.getState().status === 'checking' && turn < 20; turn++) await nextMessageTurn();
-    expect(await completion).toBe(expected);
-    expect(client.getState().status).toBe(expected === 'authenticated' ? 'authenticated' : 'error');
-    if (expected === 'authenticated') {
-      expect(fetcher).toHaveBeenCalledTimes(1);
-      expect(client.getContext()).toEqual(context);
-    } else {
-      expect(fetcher).not.toHaveBeenCalled();
-      expect(client.getContext()).toBeNull();
-    }
-  });
-
-  it('uses host tokens against a real noncredentialed HTTP fixture, including renewal after a 401', async () => {
-    const requests: { path: string; origin?: string; authorization?: string }[] = [];
-    const server = createServer((request, response) => {
-      requests.push({ path: request.url!, origin: request.headers.origin, authorization: request.headers.authorization });
-      response.setHeader('Access-Control-Allow-Origin', '*');
-      response.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-      response.setHeader('Content-Type', 'application/json');
-      if (request.url?.startsWith('/api/v2/device') && requests.filter(item => item.path.startsWith('/api/v2/device')).length === 1) {
-        response.writeHead(401); response.end('{}'); return;
-      }
-      response.end(JSON.stringify(request.url === '/api/v2/user/me' ? profile : { content: [{ id: 'screen-a', name: 'Synthetic lobby' }] }));
-    });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    const serverUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-    vi.stubGlobal('location', new URL(`https://custom.example.test/?wbEmbedVersion=1&wbParentOrigin=${encodeURIComponent(serverUrl)}&wbEmbedNonce=${nonce}`));
-    try {
-      const { client } = makeClient({ fetch: (input, options) => {
-        expect(options?.credentials).toBe('omit');
-        const headers = new Headers(options?.headers);
-        headers.set('Origin', 'null');
-        return fetch(input, { ...options, headers });
-      } });
-      const initialization = client.initialize();
-      expect(connectMessage?.origin).toBe(serverUrl);
-      const port = connectMessage!.ports[0] as MessagePort;
-      let count = 0;
-      port.onmessage = event => port.postMessage(envelope({ type: 'access-token', requestId: event.data.requestId, accessToken: jwt(false, `grant-${++count}`), expiresAt: Date.now() + 1_800_000 }));
-      port.start();
-      port.postMessage(envelope({ type: 'ready', context: { ...context, serverUrl } }));
-      await initialization;
-      await expect(client.api.get('/api/v2/device')).resolves.toEqual({ content: [{ id: 'screen-a', name: 'Synthetic lobby' }] });
-      expect(requests.every(item => item.origin === 'null')).toBe(true);
-      expect(requests[1].path).toBe('/api/v2/device?customerId=42');
-      expect(requests[1].authorization).not.toBe(requests[2].authorization);
-      expect(count).toBe(2);
-    } finally {
-      server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    }
-  });
-  it('caches a live token and coalesces concurrent renewal into one host request', async () => {
-    const { client } = makeClient();
-    const hosted = await host(client);
-    await hosted.initialization;
-    await client.getToken();
-    expect(hosted.requests).toHaveLength(1);
-    hosted.port.onmessage = event => hosted.requests.push(event.data);
-    const requests = [client.getToken(true), client.getToken(true), client.getToken(true)];
-    await vi.waitFor(() => expect(hosted.requests).toHaveLength(2));
-    const renewed = jwt(false, 'renewed');
-    hosted.port.postMessage(envelope({ type: 'access-token', requestId: hosted.requests[1].requestId, accessToken: renewed, expiresAt: Date.now() + 1_800_000 }));
-    expect(await Promise.all(requests)).toEqual([renewed, renewed, renewed]);
-    expect(hosted.requests[1]).toEqual(envelope({ type: 'get-access-token', requestId: expect.any(String) }));
-  });
-
-  it('renews a token close to expiry without a refresh credential', async () => {
-    const { client } = makeClient();
-    const hosted = await host(client, false);
+    { status: 200, body: '123', contentType: 'application/json', text: '"123"' },
+    { status: 200, body: null, contentType: 'application/problem+json', text: 'null' },
+    { status: 200, body: 'hello', contentType: 'text/plain', text: 'hello' },
+    { status: 204, body: null, contentType: 'application/json', text: '' },
+  ])('preserves raw response $status $contentType body $body', async response => {
+    const client = makeClient(); const hosted = await host(client, context, false); await hosted.initialization;
+    const request = client.api.raw('/api/v2/device');
     await vi.waitFor(() => expect(hosted.requests).toHaveLength(1));
-    hosted.port.postMessage(envelope({ type: 'access-token', requestId: hosted.requests[0].requestId, accessToken: jwt(), expiresAt: Date.now() + 30_000 }));
-    await vi.waitFor(() => expect(hosted.requests).toHaveLength(2));
-    hosted.port.postMessage(envelope({ type: 'access-token', requestId: hosted.requests[1].requestId, accessToken: jwt(false, 'longer'), expiresAt: Date.now() + 1_800_000 }));
-    await hosted.initialization;
-    expect(hosted.requests.every(request => request.type === 'get-access-token')).toBe(true);
+    hosted.port.postMessage(envelope({ type: 'api-response', requestId: hosted.requests[0].requestId, ...response }));
+    expect(await (await request).text()).toBe(response.text);
   });
-
-  it('ignores wrong protocol and unsolicited token replies until the matching response arrives', async () => {
-    const { client } = makeClient();
-    const hosted = await host(client, false);
-    await vi.waitFor(() => expect(hosted.requests).toHaveLength(1));
-    hosted.port.postMessage({ protocol: 'unrelated', version: 1, type: 'error', code: 'AUTH_REQUIRED', message: 'Ignore' });
-    hosted.port.postMessage(envelope({ type: 'access-token', requestId: 'unrelated', accessToken: jwt(), expiresAt: Date.now() + 1_800_000 }));
-    hosted.port.postMessage(envelope({ type: 'access-token', requestId: hosted.requests[0].requestId, accessToken: jwt(), expiresAt: Date.now() + 1_800_000 }));
-    expect((await hosted.initialization).status).toBe('authenticated');
+  it.each(['/api/../login', '/api/v2/%64evice', '/api/v2/device?x=1', '/api/v2/device/', '/api/v2/device;foo', 'https://evil.test/api/v2/device'])('rejects invalid API path %s', async path => {
+    const client = makeClient(); const hosted = await host(client); await hosted.initialization;
+    await expect(client.api.get(path)).rejects.toThrow(); expect(hosted.requests).toHaveLength(0);
   });
-
-  it('requests a new host token once after an API authentication failure', async () => {
-    const { client, fetcher } = makeClient();
-    const hosted = await host(client);
-    await hosted.initialization;
-    fetcher.mockResolvedValueOnce(new Response('{}', { status: 401 })).mockResolvedValueOnce(new Response('{"content":[]}'));
-    await expect(client.api.get('/api/v2/device')).resolves.toEqual({ content: [] });
+  it('rejects request header injection, reserved query params, GET body and unsupported method', async () => {
+    const client = makeClient(); const hosted = await host(client); await hosted.initialization;
+    await expect(client.api.get('/api/v2/device', { headers: { Authorization: 'Bearer malicious' } })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(client.api.get('/api/v2/device', { query: { JWTAccessToken: 'malicious' } })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(client.api.get('/api/v2/device', { body: {} })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    await expect(client.api.raw('/api/v2/device', 'HEAD')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+    expect(hosted.requests).toHaveLength(0);
+  });
+  it('allows exact read-only POST exceptions and rejects writes and mutating GETs', async () => {
+    const client = makeClient(); const hosted = await host(client, { ...context, readOnly: true }); await hosted.initialization;
+    await client.api.post('/api/deviceStat/device-a/graphs', { body: {} }); await client.api.post('/api/v2/device/requestLog', { body: {} });
+    await expect(client.api.post('/api/deviceStat/device-a/graphs/change', { body: {} })).rejects.toMatchObject({ code: 'READ_ONLY' });
+    await expect(client.api.get('/api/user/microsoft/disconnect')).rejects.toMatchObject({ code: 'READ_ONLY' });
+    await expect(client.api.delete('/api/content/item-1')).rejects.toMatchObject({ code: 'READ_ONLY' });
     expect(hosted.requests).toHaveLength(2);
-    expect(fetcher).toHaveBeenCalledTimes(3);
   });
-
-  it.each(['UNAVAILABLE', 'CONTEXT_CHANGED', 'AUTH_REQUIRED'])('clears the session when the host reports %s', async code => {
-    const { client } = makeClient();
-    const hosted = await host(client);
-    await hosted.initialization;
+  it('cancels one aborted request without affecting a parallel operation or accepting late replies', async () => {
+    const client = makeClient(); const hosted = await host(client, context, false); await hosted.initialization; const controller = new AbortController();
+    const request = client.api.get('/api/content/item-a', { signal: controller.signal }); const aborted = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    const other = client.api.get('/api/content/item-b'); await vi.waitFor(() => expect(hosted.requests).toHaveLength(2));
+    controller.abort(); await aborted; await vi.waitFor(() => expect(hosted.requests).toHaveLength(3));
+    expect(hosted.requests[2]).toEqual(envelope({ type: 'api-cancel', requestId: hosted.requests[0].requestId }));
+    hosted.port.postMessage(envelope({ type: 'api-response', requestId: hosted.requests[0].requestId, status: 200, body: { stale: true } }));
+    hosted.port.postMessage(envelope({ type: 'api-response', requestId: hosted.requests[1].requestId, status: 200, body: { id: 'item-b' } }));
+    expect(await other).toEqual({ id: 'item-b' }); expect(client.getState().status).toBe('authenticated');
+  });
+  it('times out and cancels an unanswered request without automatic replay or closing the session', async () => {
+    const client = makeClient({ requestTimeoutMs: 20 }); const hosted = await host(client, context, false); await hosted.initialization;
+    await expect(client.api.post('/api/content', { body: {} })).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' });
+    await vi.waitFor(() => expect(hosted.requests).toHaveLength(2)); expect(hosted.requests[1].type).toBe('api-cancel'); expect(client.getState().status).toBe('authenticated');
+  });
+  it('rejects connection timeout and all pending requests on close', async () => {
+    await expect(makeClient({ connectionTimeoutMs: 10 }).initialize()).rejects.toMatchObject({ code: 'CONNECTION_TIMEOUT' });
+    const client = makeClient(); const hosted = await host(client, context, false); await hosted.initialization;
+    const requests = [client.api.get('/api/content/item-a'), client.api.get('/api/content/item-b')];
+    const rejected = requests.map(request => expect(request).rejects.toThrow('closed'));
+    await vi.waitFor(() => expect(hosted.requests).toHaveLength(2)); client.dispose(); await Promise.all(rejected);
+    expect(client.getState().status).toBe('anonymous'); expect(client.getContext()).toBeNull();
+    await expect(client.initialize()).rejects.toThrow('closed'); expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each(['UNAVAILABLE', 'CONTEXT_CHANGED', 'AUTH_REQUIRED'])('clears session on fatal host %s', async code => {
+    const client = makeClient(); const hosted = await host(client); await hosted.initialization;
     hosted.port.postMessage(envelope({ type: 'error', code, message: 'Open this app again.' }));
-    await vi.waitFor(() => expect(client.getContext()).toBeNull());
-    await expect(client.getToken()).rejects.toThrow('closed');
-    expect(client.getState().user).toBeNull();
-    expect(client.getState().displayIdentity).toBeNull();
+    await vi.waitFor(() => expect(client.getContext()).toBeNull()); expect(client.getState().user).toBeNull();
   });
-
-  it('rejects connection and token timeouts instead of leaving initialization pending', async () => {
-    const first = makeClient({ connectionTimeoutMs: 10 }).client;
-    await expect(first.initialize()).rejects.toMatchObject({ code: 'CONNECTION_TIMEOUT' });
-    const second = makeClient({ requestTimeoutMs: 10 }).client;
-    const hosted = await host(second, false);
-    await expect(hosted.initialization).rejects.toMatchObject({ code: 'TOKEN_TIMEOUT' });
-  });
-
-  it('rejects expired host tokens without calling the API', async () => {
-    const { client, fetcher } = makeClient();
-    const hosted = await host(client, false);
-    const rejected = expect(hosted.initialization).rejects.toMatchObject({ code: 'INVALID_MESSAGE' });
-    await vi.waitFor(() => expect(hosted.requests).toHaveLength(1));
-    hosted.port.postMessage(envelope({ type: 'access-token', requestId: hosted.requests[0].requestId, accessToken: jwt(), expiresAt: Date.now() - 1 }));
-    await rejected;
-    expect(fetcher).not.toHaveBeenCalled();
-  });
-
-  it('does not resurrect a disposed session when a late token response arrives', async () => {
-    const { client, fetcher } = makeClient();
-    const hosted = await host(client, false);
-    const rejected = expect(hosted.initialization).rejects.toThrow('closed');
-    await vi.waitFor(() => expect(hosted.requests).toHaveLength(1));
-    client.dispose();
-    hosted.port.postMessage(envelope({ type: 'access-token', requestId: hosted.requests[0].requestId, accessToken: jwt(), expiresAt: Date.now() + 1_800_000 }));
-    await rejected;
-    expect(fetcher).not.toHaveBeenCalled();
-    expect(client.getState().status).toBe('anonymous');
-  });
-
-  it('does not log the CMS user out when this app signs out', async () => {
-    const { client, fetcher } = makeClient();
-    await (await host(client)).initialization;
-    client.signOut();
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(client.getState().status).toBe('anonymous');
-    await expect(client.initialize()).rejects.toThrow('closed');
+  it('does not log the CMS out when this app signs out', async () => {
+    const client = makeClient(); await (await host(client)).initialization; client.signOut();
+    expect(client.getState().status).toBe('anonymous'); expect(fetcher).not.toHaveBeenCalled();
   });
 });

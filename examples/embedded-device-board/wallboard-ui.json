@@ -1,0 +1,10 @@
+{
+  "readOnly": true,
+  "apiPermissions": [
+    {
+      "method": "GET",
+      "path": "/api/v2/device",
+      "description": "Read the selected customer's device overview."
+    }
+  ]
+}

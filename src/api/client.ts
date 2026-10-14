@@ -59,7 +59,7 @@ export function validateCustomerId(customerId: number): number {
   return customerId;
 }
 
-function requestUrl(serverUrl: string, path: string, options: RequestOptions): string {
+export function requestUrl(serverUrl: string, path: string, options: RequestOptions): string {
   if (!path.startsWith('/api/') || path.includes('?') || path.includes('#') || path.includes('\\')) {
     throw new TypeError('Use an /api/ path without a query or fragment; pass query separately.');
   }
@@ -166,6 +166,14 @@ export function createWallboardApi(options: ApiClientOptions): WallboardApi {
     return response;
   }
 
+  return createApiTransport(send, (path, request) => requestUrl(options.serverUrl, path, request));
+}
+
+/** Share response parsing and customer selection between direct OAuth and host-managed transports. */
+export function createApiTransport(
+  send: (path: string, method: string, request?: RequestOptions) => Promise<Response>,
+  url: (path: string, request: RequestOptions) => string,
+): WallboardApi {
   async function request<T>(path: string, method: string, requestOptions?: RequestOptions): Promise<T> {
     const response = await send(path, method, requestOptions);
     const text = await response.text();
@@ -173,7 +181,7 @@ export function createWallboardApi(options: ApiClientOptions): WallboardApi {
     if (text) {
       try { body = JSON.parse(text); } catch { body = text; }
     }
-    if (!response.ok) throw new WallboardApiError(response.status, requestUrl(options.serverUrl, path, requestOptions ?? {}), body, errorMessage(body, response));
+    if (!response.ok) throw new WallboardApiError(response.status, url(path, requestOptions ?? {}), body, errorMessage(body, response));
     return body as T;
   }
 

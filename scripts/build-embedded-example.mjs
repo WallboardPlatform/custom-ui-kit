@@ -23,7 +23,9 @@ const template = await readFile(new URL('examples/embedded-device-board/index.ht
 const html = template.replace('/* EMBEDDED_STYLES */', css.replace(/<\/style/gi, '<\\/style'))
   .replace('/* EMBEDDED_SCRIPT */', script.code.replace(/<\/script/gi, '<\\/script'));
 const destination = new URL('dist/examples/embedded/', root);
+const manifest = await readFile(new URL('examples/embedded-device-board/wallboard-ui.json', root), 'utf8');
 await mkdir(destination, { recursive: true });
 await writeFile(new URL('index.html', destination), html);
-await writeFile(new URL('fleet-overview.zip', destination), zipSync({ 'index.html': strToU8(html) }));
-console.log('Built embedded Fleet Overview: dist/examples/embedded/index.html and fleet-overview.zip');
+await writeFile(new URL('wallboard-ui.json', destination), manifest);
+await writeFile(new URL('fleet-overview.zip', destination), zipSync({ 'index.html': strToU8(html), 'wallboard-ui.json': strToU8(manifest) }));
+console.log('Built embedded Fleet Overview: dist/examples/embedded/index.html, wallboard-ui.json and fleet-overview.zip');

@@ -2,7 +2,7 @@
 
 Use `client.api.forCustomer(customerId)` for customer-owned resources. Generic requests require a customer scope or deliberate `instance: true`; singleton identity calls are an exception. Never use instance-wide queries merely to avoid selecting a customer. The server still enforces customer, team, role and read-only restrictions.
 
-Pass query parameters in `options.query`, request bodies in `options.body`, and an `AbortSignal` when a result can be superseded. The transport obtains fresh tokens, performs a bounded refresh on 401, and never replays an uncertain write as a network retry. A 403 should be shown as a permission error.
+Pass query parameters in `options.query`, request bodies in `options.body`, and an `AbortSignal` when a result can be superseded. The standalone transport obtains fresh tokens and performs a bounded refresh on 401. Embedded requests/results travel over the private CMS port; the host owns authentication and enforces the approved method/path declaration and effective read-only mode. Neither transport automatically replays an uncertain network write. A 403 should be shown as a permission error.
 
 The typed routes and entity subsets are conveniences verified from the Wallboard API. For additional endpoints, inspect the target server schema and the existing MCP `api_howto`. Verify request replacement/cascade behavior before implementing a write. Use the narrowest operation and test against designated records.
 
@@ -14,7 +14,7 @@ Keep customer changes observable: abort or discard requests for a previous custo
 
 ## Own database
 
-An application backend may use any supported database. Store application-owned workflow state there; call the ordinary Wallboard APIs for Wallboard operations. A separate database does not inherit Wallboard permissions automatically.
+An application backend may use any supported database. Store application-owned workflow state there; call the ordinary Wallboard APIs for Wallboard operations. A separate database does not inherit Wallboard permissions automatically. Embedded apps receive no host JWT and need separate backend authentication; iframe-supplied host profile fields do not establish backend identity. The notes example's bearer flow applies to standalone OAuth applications.
 
 The runnable [notes example](../examples/node-notes/README.md) uses parameterized SQLite queries and three ownership dimensions: configured Wallboard server, customer, and user. It proves that knowing another note ID does not grant access. Writes are disabled until enabled by application configuration and still honor its example role/read-only policy.
 

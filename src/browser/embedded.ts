@@ -1,49 +1,56 @@
-import { createWallboardApi, validateCustomerId, type RequestOptions, type WallboardApi } from '../api/client.js';
+import { createApiTransport, requestUrl, type Query, type RequestOptions, type WallboardApi } from '../api/client.js';
 import { NotAuthenticatedError, type ClientState, type WallboardClient } from './client.js';
-import { decodeDisplayIdentity, parseVerifiedUser, type VerifiedUser } from './identity.js';
+import { parseVerifiedUser, type VerifiedUser } from './identity.js';
 import { normalizeServerUrl } from './oauth.js';
 
 export const EMBEDDED_UI_PROTOCOL = 'wallboard.custom-ui';
-export const EMBEDDED_UI_VERSION = 1;
-
-export interface EmbeddedBootstrap {
-  readonly parentOrigin: string;
-  readonly nonce: string;
+export const EMBEDDED_UI_VERSION = 2;
+export type EmbeddedApiMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+export interface EmbeddedApiPermission {
+  readonly method: EmbeddedApiMethod;
+  readonly path: string;
+  readonly description?: string;
 }
-
+export interface EmbeddedBootstrap { readonly parentOrigin: string; readonly nonce: string }
 export interface EmbeddedWallboardContext {
   readonly appId: number;
   readonly name: string;
   readonly customerId: number;
   readonly serverUrl: string;
+  readonly readOnly: boolean;
+  readonly apiPermissions: readonly EmbeddedApiPermission[];
+  readonly user: VerifiedUser;
 }
-
 export interface EmbeddedWallboardClientOptions {
   /** Exact trusted CMS origin. Normally supplied by the CMS bootstrap query parameters. */
   parentOrigin?: string;
   nonce?: string;
-  fetch?: typeof globalThis.fetch;
   connectionTimeoutMs?: number;
   requestTimeoutMs?: number;
 }
-
 export interface EmbeddedWallboardClient extends WallboardClient {
   getContext(): EmbeddedWallboardContext | null;
   /** Disconnect this app without logging the CMS user out. A new launch needs a new client. */
   dispose(): void;
 }
-
 export class EmbeddedHostError extends Error {
-  constructor(public readonly code: string, message: string) {
+  constructor(public readonly code: string, message: string, public readonly status?: number) {
     super(message);
     this.name = 'EmbeddedHostError';
   }
 }
-
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
-
+const methods = new Set<string>(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+const reservedQuery = /^(authorization|accesstoken|jwtaccesstoken|refreshtoken|clientsecret|password|totp|totpsession|x-totp|x-totp-session|captcha|captchaversion|wbembednonce|wbparentorigin|wbembedversion|__proto__|constructor|prototype)$/i;
+function validatePath(path: string, template = false): void {
+  const segments = path.split('/').slice(2);
+  if (!path.startsWith('/api/') || path.length > 2048 || !segments.length || !/^[A-Za-z0-9_-]+$/.test(segments[0]!) ||
+      segments.some(segment => !/^[A-Za-z0-9_-]+$/.test(segment) && (!template || !/^\{[A-Za-z][A-Za-z0-9_]*\}$/.test(segment)))) {
+    throw new TypeError('Use a canonical /api/ path; pass query parameters separately.');
+  }
+}
 export function readEmbeddedBootstrap(url: string): EmbeddedBootstrap {
   const parameters = new URL(url).searchParams;
   for (const key of ['wbEmbedVersion', 'wbParentOrigin', 'wbEmbedNonce']) {
@@ -54,7 +61,6 @@ export function readEmbeddedBootstrap(url: string): EmbeddedBootstrap {
   }
   return validateBootstrap(parameters.get('wbParentOrigin')!, parameters.get('wbEmbedNonce')!);
 }
-
 function validateBootstrap(parentOrigin: string, nonce: string): EmbeddedBootstrap {
   const normalized = normalizeServerUrl(parentOrigin);
   if (normalized !== parentOrigin || !/^[a-f0-9]{64}$/.test(nonce)) {
@@ -62,214 +68,197 @@ function validateBootstrap(parentOrigin: string, nonce: string): EmbeddedBootstr
   }
   return Object.freeze({ parentOrigin, nonce });
 }
-
 function parseContext(value: unknown): EmbeddedWallboardContext {
   if (!record(value) || !Number.isSafeInteger(value.appId) || Number(value.appId) <= 0 ||
       typeof value.name !== 'string' || !value.name.trim() || value.name.length > 512 ||
       typeof value.customerId !== 'number' || !Number.isSafeInteger(value.customerId) || value.customerId <= 0 ||
-      typeof value.serverUrl !== 'string') throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid app context.');
-  validateCustomerId(Number(value.customerId));
+      typeof value.serverUrl !== 'string' || typeof value.readOnly !== 'boolean' || !Array.isArray(value.apiPermissions) || value.apiPermissions.length > 128) {
+    throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid app context.');
+  }
   const serverUrl = normalizeServerUrl(value.serverUrl);
   if (serverUrl !== value.serverUrl) throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid server origin.');
-  return Object.freeze({ appId: Number(value.appId), name: value.name, customerId: value.customerId, serverUrl });
+  const declarations = new Set<string>();
+  const apiPermissions = value.apiPermissions.map(permission => {
+    if (!record(permission) || typeof permission.method !== 'string' || !methods.has(permission.method) ||
+        typeof permission.path !== 'string' || (permission.description !== undefined && (typeof permission.description !== 'string' || permission.description.length > 500))) {
+      throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied invalid API permissions.');
+    }
+    validatePath(permission.path, true);
+    const key = `${permission.method} ${permission.path}`;
+    if (declarations.has(key)) throw new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied duplicate API permissions.');
+    declarations.add(key);
+    return Object.freeze({ method: permission.method as EmbeddedApiMethod, path: permission.path,
+      ...(permission.description === undefined ? {} : { description: permission.description }) });
+  });
+  const user = Object.freeze(parseVerifiedUser(value.user));
+  return Object.freeze({ appId: Number(value.appId), name: value.name, customerId: value.customerId,
+    serverUrl, readOnly: value.readOnly || user.readOnly, apiPermissions: Object.freeze(apiPermissions), user });
 }
-
 function timeout(value: number | undefined, fallback: number): number {
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || result <= 0 || result > 120_000) throw new TypeError('Use a positive timeout of at most two minutes.');
   return result;
 }
+function allowedRead(method: string, path: string): boolean {
+  if (method === 'GET') return !['/api/user/microsoft/connect', '/api/user/microsoft/disconnect', '/api/user/totpSecret'].includes(path);
+  return method === 'POST' && (/^\/api\/deviceStat\/[^/]+\/graphs$/.test(path) || path === '/api/v2/device/requestLog');
+}
+interface PendingRequest {
+  resolve: (response: Response) => void;
+  reject: (error: unknown) => void;
+  timer: ReturnType<typeof setTimeout>;
+  cleanup: () => void;
+}
 
-/** Host-managed, in-memory authentication. This client never opens OAuth or reads browser storage. */
+/** Tokenless host-managed API transport. Never opens OAuth, reads storage or fetches Wallboard directly. */
 export function createEmbeddedWallboardClient(options: EmbeddedWallboardClientOptions = {}): EmbeddedWallboardClient {
   if (!globalThis.location || !globalThis.parent || globalThis.parent === globalThis.self) {
     throw new EmbeddedHostError('NOT_EMBEDDED', 'Open this application from the Wallboard My Apps menu.');
   }
   const bootstrap = options.parentOrigin !== undefined && options.nonce !== undefined
-    ? validateBootstrap(options.parentOrigin, options.nonce)
-    : readEmbeddedBootstrap(globalThis.location.href);
+    ? validateBootstrap(options.parentOrigin, options.nonce) : readEmbeddedBootstrap(globalThis.location.href);
   if ((options.parentOrigin !== undefined && options.parentOrigin !== bootstrap.parentOrigin) ||
       (options.nonce !== undefined && options.nonce !== bootstrap.nonce)) throw new EmbeddedHostError('INVALID_BOOTSTRAP', 'The embedded UI launch does not match its configured host.');
   const connectionTimeoutMs = timeout(options.connectionTimeoutMs, 15_000);
-  // The CMS host allows 30 seconds for launch revalidation and session renewal.
   const requestTimeoutMs = timeout(options.requestTimeoutMs, 35_000);
-  const fetcher = options.fetch ?? globalThis.fetch;
   const listeners = new Set<(state: ClientState) => void>();
-  const controller = new AbortController();
+  const pending = new Map<string, PendingRequest>();
   let context: EmbeddedWallboardContext | null = null;
   let apiClient: WallboardApi | null = null;
-  let user: VerifiedUser | null = null;
-  let token: { accessToken: string; expiresAt: number } | null = null;
   let port: MessagePort | null = null;
   let disposed = false;
   let connection: Promise<void> | null = null;
   let resolveConnection: (() => void) | null = null;
   let rejectConnection: ((error: Error) => void) | null = null;
   let connectionTimer: ReturnType<typeof setTimeout> | null = null;
-  let initializing: Promise<ClientState> | null = null;
-  let renewing: Promise<string> | null = null;
-  let pending: { id: string; resolve: (token: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   let state: ClientState = Object.freeze({ status: 'idle', serverUrl: '', clientId: null, user: null, displayIdentity: null, customerId: null, readOnly: false, error: null });
-
   function emit(status: ClientState['status'], error: Error | null = null): void {
-    const displayIdentity = token ? decodeDisplayIdentity(token.accessToken) : null;
-    state = Object.freeze({
-      status, serverUrl: context?.serverUrl ?? state.serverUrl, clientId: null,
-      user: user ? Object.freeze({ ...user }) : null,
-      displayIdentity: displayIdentity ? Object.freeze(displayIdentity) : null,
-      customerId: context ? Number(context.customerId) : null,
-      readOnly: user?.readOnly === true || displayIdentity?.readOnly === true, error,
-    });
-    for (const listener of listeners) {
-      try { listener(state); } catch { /* Subscriber rendering failures do not affect authentication. */ }
-    }
+    state = Object.freeze({ status, serverUrl: context?.serverUrl ?? state.serverUrl, clientId: null,
+      user: context?.user ?? null, displayIdentity: null, customerId: context?.customerId ?? null,
+      readOnly: context?.readOnly ?? false, error });
+    for (const listener of listeners) { try { listener(state); } catch { /* Rendering failures must not change transport state. */ } }
   }
-
+  function finish(requestId: string): PendingRequest | undefined {
+    const request = pending.get(requestId);
+    if (request) { pending.delete(requestId); clearTimeout(request.timer); request.cleanup(); }
+    return request;
+  }
   function disconnect(error: Error, status: ClientState['status'] = 'error'): void {
     disposed = true;
-    controller.abort(error);
     if (connectionTimer) clearTimeout(connectionTimer);
     connectionTimer = null;
-    rejectConnection?.(error);
-    rejectConnection = null;
-    resolveConnection = null;
-    if (pending) { clearTimeout(pending.timer); pending.reject(error); pending = null; }
+    rejectConnection?.(error); rejectConnection = null; resolveConnection = null;
+    for (const id of pending.keys()) {
+      try { port?.postMessage({ protocol: EMBEDDED_UI_PROTOCOL, version: EMBEDDED_UI_VERSION, type: 'api-cancel', requestId: id }); } catch { /* The host may already be closed. */ }
+      finish(id)?.reject(error);
+    }
     if (port) { port.onmessage = null; port.onmessageerror = null; port.close(); }
-    port = null;
-    token = null;
-    user = null;
-    context = null;
-    apiClient = null;
+    port = null; context = null; apiClient = null;
     emit(status, status === 'anonymous' ? null : error);
   }
-
-  function withCustomer(path: string, request: RequestOptions = {}): RequestOptions {
-    if (!context || disposed) throw new NotAuthenticatedError('The embedded session closed. Open the app again.');
-    if (path === '/api/v2/user/me' || request.instance || request.customerId !== undefined || request.query?.customerId !== undefined) return request;
-    return { ...request, customerId: Number(context!.customerId) };
-  }
-
-  function createApi(serverUrl: string): WallboardApi {
-    const base = createWallboardApi({ serverUrl, getToken, fetch: fetcher });
-    return {
-      get: (path, request) => base.get(path, withCustomer(path, request)),
-      post: (path, request) => base.post(path, withCustomer(path, request)),
-      put: (path, request) => base.put(path, withCustomer(path, request)),
-      patch: (path, request) => base.patch(path, withCustomer(path, request)),
-      delete: (path, request) => base.delete(path, withCustomer(path, request)),
-      raw: (path, method, request) => base.raw(path, method, withCustomer(path, request)),
-      forCustomer: base.forCustomer,
-    };
-  }
-
   function receive(value: unknown): void {
     if (disposed || !record(value) || value.protocol !== EMBEDDED_UI_PROTOCOL || value.version !== EMBEDDED_UI_VERSION) return;
-    if (value.type === 'ready') {
+    if (value.type === 'context') {
       if (context) { disconnect(new EmbeddedHostError('CONTEXT_CHANGED', 'The Wallboard app context changed. Open the app again.')); return; }
       try {
         context = parseContext(value.context);
         if (context.serverUrl !== bootstrap.parentOrigin) throw new EmbeddedHostError('INVALID_MESSAGE', 'The app server does not match its configured Wallboard host.');
-        apiClient = createApi(context.serverUrl);
+        apiClient = createApiTransport(send, (path, request) => requestUrl(context!.serverUrl, path, withCustomer(path, request)));
         if (connectionTimer) clearTimeout(connectionTimer);
         connectionTimer = null;
-        resolveConnection?.();
-        resolveConnection = null;
-        rejectConnection = null;
+        emit('authenticated'); resolveConnection?.(); resolveConnection = null; rejectConnection = null;
       } catch (cause) { disconnect(cause instanceof Error ? cause : new EmbeddedHostError('INVALID_MESSAGE', 'The app context could not be read.')); }
-    } else if (value.type === 'access-token' && pending && value.requestId === pending.id) {
-      if (!context || typeof value.accessToken !== 'string' || value.accessToken.length > 65_536 ||
-          !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value.accessToken) ||
-          !Number.isSafeInteger(value.expiresAt) || Number(value.expiresAt) <= Date.now()) {
-        disconnect(new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid or expired access token.')); return;
+    } else if (value.type === 'api-response' && typeof value.requestId === 'string' && pending.has(value.requestId)) {
+      if (!Number.isSafeInteger(value.status) || Number(value.status) < 200 || Number(value.status) > 599 ||
+          (value.contentType !== undefined && (typeof value.contentType !== 'string' || /[\r\n]/.test(value.contentType)))) {
+        disconnect(new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid API response.')); return;
       }
-      token = { accessToken: value.accessToken, expiresAt: Number(value.expiresAt) };
-      clearTimeout(pending.timer);
-      pending.resolve(token.accessToken);
-      pending = null;
-      emit(user ? 'authenticated' : 'checking');
-    } else if (value.type === 'error' && (value.requestId === undefined || value.requestId === pending?.id)) {
-      const codes = ['UNAVAILABLE', 'CONTEXT_CHANGED', 'AUTH_REQUIRED', 'INVALID_REQUEST'];
-      if (typeof value.code !== 'string' || !codes.includes(value.code) || typeof value.message !== 'string' || value.message.length > 512) {
+      try {
+        const status = Number(value.status);
+        const contentType = typeof value.contentType === 'string' ? value.contentType : 'application/json';
+        const isJson = contentType.includes('/json') || contentType.includes('+json');
+        const body = [204, 205, 304].includes(status) || value.body === undefined ? null :
+          isJson ? JSON.stringify(value.body) : value.body === null ? null : typeof value.body === 'string' ? value.body : JSON.stringify(value.body);
+        const response = new Response(body, { status, headers: { 'Content-Type': contentType } });
+        finish(value.requestId)?.resolve(response);
+      } catch { disconnect(new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an unreadable API response.')); }
+    } else if (value.type === 'error') {
+      if (typeof value.code !== 'string' || value.code.length > 80 || typeof value.message !== 'string' || value.message.length > 512 ||
+          (value.status !== undefined && (!Number.isSafeInteger(value.status) || Number(value.status) < 400 || Number(value.status) > 599))) {
         disconnect(new EmbeddedHostError('INVALID_MESSAGE', 'Wallboard supplied an invalid host error.')); return;
       }
-      disconnect(new EmbeddedHostError(value.code, value.message), value.code === 'AUTH_REQUIRED' ? 'anonymous' : 'error');
+      const error = new EmbeddedHostError(value.code, value.message, value.status as number | undefined);
+      if (['CONTEXT_CHANGED', 'AUTH_REQUIRED', 'UNAVAILABLE'].includes(value.code) || value.requestId === undefined) {
+        disconnect(error, value.code === 'AUTH_REQUIRED' ? 'anonymous' : 'error');
+      } else if (typeof value.requestId === 'string') finish(value.requestId)?.reject(error);
     }
   }
-
   function connect(): Promise<void> {
     if (disposed) return Promise.reject(new NotAuthenticatedError('The embedded session closed. Open the app again.'));
     if (context) return Promise.resolve();
     if (connection) return connection;
     emit('checking');
     connection = new Promise((resolve, reject) => {
-      resolveConnection = resolve;
-      rejectConnection = reject;
-      const channel = new MessageChannel();
-      port = channel.port1;
+      resolveConnection = resolve; rejectConnection = reject;
+      const channel = new MessageChannel(); port = channel.port1;
       port.onmessage = event => receive(event.data);
       port.onmessageerror = () => disconnect(new EmbeddedHostError('INVALID_MESSAGE', 'The Wallboard message channel could not be read.'));
       port.start();
       connectionTimer = setTimeout(() => disconnect(new EmbeddedHostError('CONNECTION_TIMEOUT', 'Wallboard did not connect this app. Open it again from My Apps.')), connectionTimeoutMs);
-      try {
-        globalThis.parent.postMessage({ protocol: EMBEDDED_UI_PROTOCOL, version: EMBEDDED_UI_VERSION, type: 'connect', nonce: bootstrap.nonce }, bootstrap.parentOrigin, [channel.port2]);
-      } catch {
-        channel.port2.close();
-        disconnect(new EmbeddedHostError('CONNECTION_FAILED', 'The Wallboard host could not receive this app connection.'));
-      }
+      try { globalThis.parent.postMessage({ protocol: EMBEDDED_UI_PROTOCOL, version: EMBEDDED_UI_VERSION, type: 'connect', nonce: bootstrap.nonce }, bootstrap.parentOrigin, [channel.port2]); }
+      catch { channel.port2.close(); disconnect(new EmbeddedHostError('CONNECTION_FAILED', 'The Wallboard host could not receive this app connection.')); }
     });
     return connection;
   }
-
-  async function getToken(forceRefresh = false): Promise<string> {
+  function withCustomer(path: string, request: RequestOptions = {}): RequestOptions {
+    if (!context || disposed) throw new NotAuthenticatedError('The embedded session closed. Open the app again.');
+    if (path === '/api/v2/user/me' || request.instance || request.customerId !== undefined || request.query?.customerId !== undefined) return request;
+    return { ...request, customerId: context.customerId };
+  }
+  async function send(path: string, method: string, request: RequestOptions = {}): Promise<Response> {
     await connect();
-    if (disposed || !context || !port) throw new NotAuthenticatedError('The embedded session closed. Open the app again.');
-    if (!forceRefresh && token && token.expiresAt - Date.now() > 60_000) return token.accessToken;
-    if (renewing) return renewing;
-    const requestId = `token-${crypto.randomUUID()}`;
-    renewing = new Promise<string>((resolve, reject) => {
-      pending = { id: requestId, resolve, reject, timer: setTimeout(() => disconnect(new EmbeddedHostError('TOKEN_TIMEOUT', 'Wallboard did not provide an access token. Open the app again.')), requestTimeoutMs) };
-      try {
-        port!.postMessage({ protocol: EMBEDDED_UI_PROTOCOL, version: EMBEDDED_UI_VERSION, type: 'get-access-token', requestId });
-      } catch { disconnect(new EmbeddedHostError('CONNECTION_FAILED', 'The Wallboard app session disconnected.')); }
-    }).finally(() => { renewing = null; });
-    return renewing;
-  }
-
-  async function initialize(): Promise<ClientState> {
-    try {
-      await connect();
-      await getToken();
-      const verified = parseVerifiedUser(await apiClient!.get('/api/v2/user/me', { signal: controller.signal }));
-      if (disposed) throw new NotAuthenticatedError('The embedded session closed. Open the app again.');
-      user = verified;
-      emit('authenticated');
-      return state;
-    } catch (cause) {
-      const error = cause instanceof Error ? cause : new Error('Embedded sign-in failed.');
-      if (!disposed) emit('error', error);
-      throw error;
+    request.signal?.throwIfAborted();
+    validatePath(path);
+    if (!methods.has(method)) throw new EmbeddedHostError('INVALID_REQUEST', 'The embedded proxy supports GET, POST, PUT, PATCH and DELETE only.');
+    if (request.headers && [...new Headers(request.headers).keys()].length) throw new EmbeddedHostError('INVALID_REQUEST', 'The Wallboard host owns all API request headers.');
+    if (method === 'GET' && request.body !== undefined) throw new EmbeddedHostError('INVALID_REQUEST', 'GET requests cannot contain a body.');
+    if (context!.readOnly && !allowedRead(method, path)) throw new EmbeddedHostError('READ_ONLY', 'This app is running read-only.', 403);
+    const scoped = withCustomer(path, request);
+    const url = new URL(requestUrl(context!.serverUrl, path, scoped));
+    const params: Query = {};
+    for (const key of new Set(url.searchParams.keys())) {
+      if (reservedQuery.test(key) || /[\u0000-\u001f\u007f]/.test(key)) throw new EmbeddedHostError('INVALID_REQUEST', 'Authentication and host parameters cannot be supplied by an app.');
+      const values = url.searchParams.getAll(key); params[key] = values.length === 1 ? values[0] : values;
     }
+    // Requests are JSON-only; binary streams and request headers belong to a separate integration.
+    const body = request.body === undefined ? undefined : JSON.parse(JSON.stringify(request.body)) as unknown;
+    const requestId = `api-${crypto.randomUUID()}`;
+    return new Promise<Response>((resolve, reject) => {
+      const cancel = (error: unknown) => {
+        const active = finish(requestId);
+        if (!active) return;
+        try { port?.postMessage({ protocol: EMBEDDED_UI_PROTOCOL, version: EMBEDDED_UI_VERSION, type: 'api-cancel', requestId }); } catch { /* Settle locally even when the host has closed. */ }
+        active.reject(error);
+      };
+      const abort = () => cancel(request.signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+      pending.set(requestId, { resolve, reject,
+        timer: setTimeout(() => cancel(new EmbeddedHostError('REQUEST_TIMEOUT', 'Wallboard did not complete this API request.')), requestTimeoutMs),
+        cleanup: () => request.signal?.removeEventListener('abort', abort) });
+      request.signal?.addEventListener('abort', abort, { once: true });
+      if (request.signal?.aborted) { abort(); return; }
+      try { port!.postMessage({ protocol: EMBEDDED_UI_PROTOCOL, version: EMBEDDED_UI_VERSION, type: 'api-request', requestId, method, path,
+        ...(Object.keys(params).length ? { params } : {}), ...(body === undefined ? {} : { body }) }); }
+      catch { finish(requestId)?.reject(new EmbeddedHostError('INVALID_REQUEST', 'The API request could not be sent to Wallboard.')); }
+    });
   }
-
   return {
-    initialize() {
-      if (!initializing) initializing = initialize().finally(() => { initializing = null; });
-      return initializing;
-    },
+    async initialize() { await connect(); return state; },
     async signIn() { throw new EmbeddedHostError('HOST_MANAGED_AUTH', 'Wallboard manages this embedded session. Open the app again from My Apps.'); },
+    async getToken() { throw new EmbeddedHostError('API_PROXY_ONLY', 'Embedded apps use the Wallboard API proxy and cannot obtain a Wallboard token.'); },
     signOut() { disconnect(new NotAuthenticatedError('The app session closed.'), 'anonymous'); },
     dispose() { disconnect(new NotAuthenticatedError('The app session closed.'), 'anonymous'); },
-    getToken,
-    getState: () => state,
-    getContext: () => context,
-    subscribe(listener) {
-      listeners.add(listener);
-      listener(state);
-      return () => { listeners.delete(listener); };
-    },
-    get api() {
-      if (!apiClient) throw new NotAuthenticatedError('Initialize the embedded client before using its API.');
-      return apiClient;
-    },
+    getState: () => state, getContext: () => context,
+    subscribe(listener) { listeners.add(listener); listener(state); return () => { listeners.delete(listener); }; },
+    get api() { if (!apiClient) throw new NotAuthenticatedError('Initialize the embedded client before using its API.'); return apiClient; },
   };
 }
