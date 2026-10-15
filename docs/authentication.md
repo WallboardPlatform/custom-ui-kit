@@ -1,6 +1,6 @@
 # Authentication
 
-Create one browser client per application/server and call `initialize()` before using its session. Subscribe to its state to render signed-out, checking, authenticated and error states. `state.user` is obtained from `GET /api/v2/user/me`; decoded JWT display hints never establish authorization.
+Create one browser client per application/server and call `initialize()` before using its session. Subscribe to its state to render signed-out, checking, authenticated and error states. Standalone `state.user` comes from authenticated `GET /api/v2/user/me`; embedded `state.user` comes from the trusted CMS host's verified session profile. Decoded standalone JWT display hints never establish authorization.
 
 ## Browser flow
 
@@ -11,6 +11,43 @@ The client discovers the configured server's OAuth endpoints. Supply a registere
 Sessions use tab-local `sessionStorage` by default. Refresh tokens rotate, so `getToken()` coordinates one in-flight refresh per client. Avoid creating competing clients for the same stored session, or injecting shared cross-tab token storage without cross-tab refresh coordination. `signOut()` clears local credentials; use the application's explicit server logout policy where server-side revocation is required.
 
 The default requests a short refresh session (`keepSignedIn: false`). The application can explicitly offer a longer session through the client's sign-in option. Expired, rejected or unreadable storage must produce a sign-in/error state, not silently bypass callback checks.
+
+## Embedded CMS session
+
+```ts
+import { createEmbeddedWallboardClient, WB, type WbDevice, type WbPage } from '@wallboard/custom-ui-kit';
+
+const client = createEmbeddedWallboardClient({
+  manifest: {
+    readOnly: true,
+    operations: [{ method: 'GET', path: '/api/v2/device', description: 'Read devices' }],
+  },
+});
+await client.initialize();
+const devices = await client.api.get<WbPage<WbDevice>>(WB.device, {
+  query: { page: 0, size: 20, select: 'id,name,deviceStatus' },
+});
+```
+
+Use this adapter for a Custom UI launched from the compatible CMS My Apps host. The host supplies its exact origin and one-use launch nonce in bootstrap query parameters. The child creates one MessageChannel and transfers a port to that origin. Protocol version 2 sends verified user/context information and JSON API requests/results over that port. The CMS performs the authenticated request itself; the iframe receives no Wallboard access or refresh token, opens no OAuth flow, reads no browser storage and performs no direct Wallboard fetch. `getToken()` rejects with `API_PROXY_ONLY`; `signIn()` is unavailable. `signOut()`/`dispose()` close only this app connection and cancel pending requests. A version 1 token host/client is incompatible: upgrade both the host and embedded SDK, with no token fallback.
+
+The app defines its requirements in the constructor's `manifest` object: `{ readOnly, operations: [{ method, path, description? }] }`. The SDK validates and freezes a snapshot before connecting, then sends it in the initial `connect` message. The isolated iframe initializes with zero Wallboard API access. The trusted parent displays this declaration and sends no profile/context/API results until approval. `initialize()` stays pending while the user decides; `client.api` is unavailable. Approval echoes the exact declared manifest, and the SDK rejects a mismatch or write mode for a declared read-only app. `connectionTimeoutMs` covers this human approval wait and defaults to five minutes, independently of the API `requestTimeoutMs` default of 35 seconds (longer than the parent's 30-second request deadline). Declining or closing the launch ends the pending connection; retry needs a fresh launch.
+
+`getContext()` identifies the launched app, selected customer, approved `manifest`, effective `readOnly` mode and verified account. `state.customerId` and ordinary API request defaults use that selection, while `state.user` remains the actual account identity and `state.displayIdentity` is null. Explicit customer or instance requests still follow the API client's existing scope rules and backend permissions. The proxy limits methods/endpoints, not the resources the actual account can access through them. Closing/removing the app stops new operations and cancels pending requests; cancellation cannot undo a write already executed by the backend.
+
+Declare each method and path template the app calls under `manifest.operations`, for example `{ "method": "GET", "path": "/api/v2/device", "description": "Read devices" }`. `PUT` on the same path is a separate permission. At most 128 declarations are accepted; paths are canonical `/api/` paths of at most 2048 characters with a literal first resource segment and subsequent literal or complete `{identifier}` segments. Descriptions are optional and at most 500 characters. Duplicate method/path pairs, wildcards, regex, encoded aliases, query strings and external origins are not permission templates. Pass query values in `options.query`; the proxy accepts JSON bodies and GET/POST/PUT/PATCH/DELETE, without app-supplied headers. `raw()` reconstructs a Response with status, body and content type; arbitrary headers, binary streaming and file uploads are outside this embedded transport.
+
+The CMS saves no permission declaration in app metadata and does not extract it from a ZIP. The running app supplies it itself through the handshake, for both hosted URLs and bundles. The approved snapshot belongs to that isolated launch. Undeclared operations fail even if the user's normal API permissions allow them. Reload, changed declarations/source or reconnection require a fresh launch and approval; the app cannot enlarge an approved snapshot through the message channel. Host-owned authentication/elevation operations are unavailable, and the proxy does not silently use an existing temporary elevated CMS credential.
+
+Read-only is the intersection of account, host-forced and app-declared restrictions: any read-only flag locks that launch to read-only. An app declaring `manifest.readOnly: true` has no write-mode switch. GET is allowed except known mutating/authentication GET routes; the exact read POST exceptions are `/api/deviceStat/{deviceId}/graphs` and `/api/v2/device/requestLog`, which must still be declared and approved. Diagnostic-log collection triggers device activity and should be explained in the permission description. The SDK guards obvious writes, but the CMS independently enforces the approved declaration and mode on every request.
+
+Deletion requires an additional trusted-parent confirmation for each actual delegated request, even when its method/path was approved at launch. This covers HTTP `DELETE` and explicitly recognized legacy deletion routes; the authoritative classification remains with the CMS and [Wallboard API reference](https://docs.wallboard.us/api-reference/). The app cannot confirm a deletion itself. The parent checks availability, permissions, mode and the current ordinary user credential again after confirmation. A decline returns request-scoped `CONFIRMATION_DENIED` with status 403; handle it as a cancelled operation, without automatic retry or ending the whole app session.
+
+While the parent displays confirmation, it sends exactly `{ protocol, version: 2, type: 'api-awaiting-confirmation', requestId }` over the private port. The SDK replaces that request's normal API deadline with a bounded 305-second human wait, covering the parent's 300-second decision deadline. After affirmative confirmation the parent sends `api-executing` with the same four fields, and the SDK restarts the original `requestTimeoutMs` (35-second default or the explicitly configured value). A request can enter confirmation once; duplicate or out-of-order progress cannot extend its deadlines. Unknown/late request IDs are ignored, while malformed progress for a pending request closes the transport. No progress message contains request details or credentials. Abort/dispose cancels pending review through `api-cancel`; normal requests retain their API deadline and a review timeout cancels only that request.
+
+In v1, `CUSTOMER` apps require an actual authenticated non-ADMIN account belonging to the app's immutable owning customer, for both hosted URLs and uploaded bundles. The backend compares the ordinary signed JWT's own customer ID with the stored owner. ADMIN and reseller/network OWNER visiting a member customer's app receive 403; a reseller OWNER can launch its own customer's apps with its normal API authority. Metadata management keeps its existing permissions. `PLATFORM` apps retain the current user's normal authority, including explicitly trusted ADMIN launches. Customer selection and frontend View As do not change the account identity or downscope its token; impersonation preview cannot launch embedded apps. A real backend customer-preview/delegation session is a separate step 2, not an available v1 login mode.
+
+An embedded app cannot forward a host Wallboard JWT to its own backend. Such a backend, background jobs and database access need a separate explicit authentication design; host profile fields forwarded by the iframe are not backend proof of identity. Standalone OAuth apps can use their own token with the validator below. Never write tokens to URLs, logs, source or persistent application records. An opaque iframe's `null` origin is not identity and cannot prove the final hosted provider origin.
 
 ## Application backend
 

@@ -34,12 +34,13 @@ Choose `vanilla` instead of `vue` for plain TypeScript. The generator refuses an
 
 | Path | Purpose |
 | --- | --- |
-| `src/browser` | OAuth discovery and registration, PKCE, callback state, tab-local sessions, coordinated rotating refresh |
+| `src/browser` | Standalone OAuth/PKCE and rotating refresh; tokenless embedded CMS API transport over a private MessagePort |
 | `src/api` | Authenticated requests, explicit customer scope, WBQL, typed common entities, pagination and media helpers |
 | `src/vue` | Optional reactive adapter, sign-in gate, customer selector, app frame, loading/error/empty states, connectivity, async loading |
 | `src/backend` | Online identity validation against a configured Wallboard server, customer scope and application permission helpers |
 | `examples/vue-device-board` | Read-only device overview, including signed-out, selected-customer, loading, empty and error states |
 | `examples/vanilla-device-board` | The same integration without a UI framework |
+| `examples/embedded-device-board` | Read-only Fleet Overview packaged as a single HTML document and upload ZIP for My Apps |
 | `examples/node-notes` | Backend with SQLite and user/customer-isolated application records; writes are explicitly opt-in |
 | `guide/custom-ui-guide.json` | Canonical, versioned authoring guide consumed by the Wallboard MCP server |
 
@@ -71,8 +72,8 @@ API field and operation details remain authoritative in the [Wallboard API refer
 
 ## Verification and boundaries
 
-`npm run check` runs the TypeScript/Vue check, synthetic unit/integration tests, SDK build, and both browser example bundles. The backend tests exercise real local SQLite ownership boundaries with a mocked Wallboard identity service. Browser OAuth tests mock HTTP and storage; passing them does not establish deployed OAuth, provider hosting, or iframe compatibility.
+`npm run check` runs the TypeScript/Vue check, synthetic unit/integration tests, SDK build, and all browser example bundles. The backend tests exercise real local SQLite ownership boundaries with a mocked Wallboard identity service. Embedded tests use real MessageChannels with synthetic host replies; passing them does not establish a deployed CMS host or provider compatibility.
 
-The app owner supplies hosting, an allowed OAuth redirect, and any database or backend secrets. Generated source contains no builder/MCP token. Standalone login is implemented; iframe login handoff and a configurable CMS Custom UI menu are separate integrations. Database permissions belong to the application. No public app catalogue, customer-specific configuration, or private application source is included.
+The app owner supplies hosting and any database or backend secrets. Standalone apps also need an allowed OAuth redirect. Generated source contains no builder/MCP token. Embedded apps declare an object manifest in their initial handshake and require user approval in the matching CMS host before receiving identity or any API access. The isolated iframe initializes first with zero API access; permissions are not separately registered in CMS metadata. The host performs approved requests without passing a Wallboard token to the iframe; account, host-forced and app-declared read-only modes combine. See the [uploadable example](examples/embedded-device-board/README.md) and [embedded authentication](docs/authentication.md#embedded-cms-session). Customer-owned apps require an actual non-ADMIN account belonging to the immutable owning customer. A reseller visiting a member customer cannot launch its apps; the reseller's own-customer apps remain allowed. Metadata management is unchanged, and platform apps keep normal user authority subject to approved operations and the active mode, including trusted ADMIN launches. The proxy restricts operations, not the underlying user's resource authority; customer selection/View As does not narrow it. Embedded apps need separate authentication for their own backend/database. No public app catalogue or private customer source is included.
 
 The reusable kit is MIT-licensed. Its browser auth/API patterns originate in Wallboard's Custom UI framework; customer applications retain their own source and release lifecycle.
